@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [1.0.0] - 2025-10-10
+
 ### Added
 - Initial release of Snowflake ID generator
 - Core ID generation with monotonic clock support
@@ -19,23 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive test coverage
 - Benchmark suite
 - CI/CD workflows
-
-### Changed
-
-### Deprecated
-
-### Removed
-
-### Fixed
-
-### Security
-
----
-
-## [1.0.0] - YYYY-MM-DD
-
-### Added
-- Initial stable release
+- Complete project documentation and templates
+- Development tooling (Makefile, linting config)
 
 ---
 
