@@ -72,6 +72,10 @@ const (
 	// This is the maximum number of IDs a single worker can generate per millisecond.
 	SequenceBits = 12
 
+	// TimestampBits is the number of bits allocated for timestamp (41 bits).
+	// This provides ~69.73 years of unique timestamps from the epoch.
+	TimestampBits = 41
+
 	// MaxWorkerID is the maximum valid worker ID (1023).
 	// Calculated using bitwise operations: -1 ^ (-1 << 10) = 0b1111111111 = 1023
 	MaxWorkerID = -1 ^ (-1 << WorkerIDBits)
@@ -79,6 +83,10 @@ const (
 	// MaxSequence is the maximum sequence number (4095).
 	// Calculated using bitwise operations: -1 ^ (-1 << 12) = 0b111111111111 = 4095
 	MaxSequence = -1 ^ (-1 << SequenceBits)
+
+	// MaxTimestamp is the maximum timestamp value before overflow (2^41 - 1 milliseconds).
+	// This represents approximately 69.73 years from the epoch before timestamp overflow.
+	MaxTimestamp = (1 << TimestampBits) - 1
 
 	// TimestampShift is the number of bits to shift timestamp left (22 bits).
 	// This positions the timestamp in the upper 41 bits of the 64-bit ID.
@@ -92,6 +100,10 @@ const (
 	// If the clock moves backward by less than this, we wait it out.
 	// If it exceeds this, we return an error to prevent duplicate IDs.
 	DefaultMaxClockBackward = 5 * time.Millisecond
+
+	// TimestampWarningThreshold is the utilization percentage at which to warn about
+	// approaching timestamp overflow. Default is 80% (0.80).
+	TimestampWarningThreshold = 0.80
 )
 
 // Errors returned by the Snowflake generator.
@@ -231,6 +243,46 @@ type Metrics struct {
 	ClockBackwardErr int64 // Clock backward errors (exceeded tolerance, ID not generated)
 	SequenceOverflow int64 // Sequence exhaustion events (had to wait for next millisecond)
 	WaitTimeUs       int64 // Total time spent waiting (in microseconds)
+}
+
+// LifespanInfo provides comprehensive information about timestamp utilization and lifespan.
+//
+// This struct contains metrics about how much of the timestamp range has been used
+// and how much time remains before timestamp overflow occurs.
+//
+// Example usage:
+//
+//	info := gen.LifespanInfo()
+//	if info.IsApproaching {
+//	    log.Warn("Approaching timestamp overflow",
+//	        "utilization", info.Utilization,
+//	        "remaining", info.Remaining,
+//	        "overflow_date", info.OverflowDate)
+//	}
+type LifespanInfo struct {
+	// Utilization is the percentage of timestamp range used (0.0-1.0).
+	// Example: 0.25 means 25% of the 69-year lifespan has been used.
+	Utilization float64
+
+	// Remaining is the time until timestamp overflow.
+	// This is the duration from now until the timestamp bits are exhausted.
+	Remaining time.Duration
+
+	// TotalLifespan is the total possible lifespan (~69.73 years).
+	// This is determined by the 41-bit timestamp field.
+	TotalLifespan time.Duration
+
+	// CurrentAge is the time elapsed since the epoch.
+	// This is how long the generator has been operational.
+	CurrentAge time.Duration
+
+	// OverflowDate is when timestamp overflow will occur.
+	// This is approximately epoch + 69.73 years.
+	OverflowDate time.Time
+
+	// IsApproaching indicates if utilization exceeds the warning threshold (80%).
+	// Applications should monitor this and plan for migration to a new epoch.
+	IsApproaching bool
 }
 
 // Generator generates Snowflake IDs with production-grade reliability.
@@ -791,6 +843,163 @@ func (g *Generator) ResetMetrics() {
 //	log.Info("generator initialized", "workerID", workerID)
 func (g *Generator) WorkerID() int64 {
 	return g.workerID
+}
+
+// TimestampUtilization returns the percentage of timestamp range used (0.0-1.0).
+//
+// This calculates how much of the 41-bit timestamp space has been consumed since
+// the epoch. A value of 0.5 means 50% of the ~69-year lifespan has been used.
+//
+// Performance: ~50ns (time calculation + division)
+// Thread-safe: Yes, no locks required
+//
+// Example:
+//
+//	utilization := gen.TimestampUtilization()
+//	if utilization > 0.80 {
+//	    log.Warn("High timestamp utilization", "percent", utilization*100)
+//	}
+func (g *Generator) TimestampUtilization() float64 {
+	// Get current timestamp relative to the epoch
+	currentTime := time.Now().UnixMilli()
+	elapsed := currentTime - g.customEpoch
+
+	// Prevent division by zero or negative values
+	if elapsed <= 0 {
+		return 0.0
+	}
+
+	// Calculate utilization as percentage of max timestamp
+	utilization := float64(elapsed) / float64(MaxTimestamp)
+
+	// Clamp to [0.0, 1.0] range
+	if utilization > 1.0 {
+		return 1.0
+	}
+	if utilization < 0.0 {
+		return 0.0
+	}
+
+	return utilization
+}
+
+// RemainingLifespan returns the duration until timestamp overflow.
+//
+// This calculates how much time remains before the 41-bit timestamp field
+// is exhausted. Applications should monitor this and plan for epoch migration
+// when approaching the limit.
+//
+// Performance: ~50ns (time calculation)
+// Thread-safe: Yes, no locks required
+//
+// Example:
+//
+//	remaining := gen.RemainingLifespan()
+//	fmt.Printf("Generator will overflow in: %v\n", remaining)
+//	if remaining < 365*24*time.Hour { // Less than 1 year
+//	    log.Error("Approaching timestamp overflow!")
+//	}
+func (g *Generator) RemainingLifespan() time.Duration {
+	// Get current timestamp relative to the epoch
+	currentTime := time.Now().UnixMilli()
+	elapsed := currentTime - g.customEpoch
+
+	// Calculate remaining milliseconds until overflow
+	remaining := MaxTimestamp - elapsed
+
+	// If already past overflow (shouldn't happen), return 0
+	if remaining < 0 {
+		return 0
+	}
+
+	// Convert milliseconds to duration
+	return time.Duration(remaining) * time.Millisecond
+}
+
+// IsApproachingOverflow returns true if timestamp utilization exceeds 80%.
+//
+// This is a convenience method for checking if the generator is approaching
+// timestamp overflow. When this returns true, applications should start planning
+// for migration to a new epoch.
+//
+// Performance: ~50ns (calls TimestampUtilization)
+// Thread-safe: Yes, no locks required
+//
+// Example:
+//
+//	if gen.IsApproachingOverflow() {
+//	    log.Warn("Timestamp overflow approaching, plan migration")
+//	    metrics.IncrementOverflowWarningCounter()
+//	}
+func (g *Generator) IsApproachingOverflow() bool {
+	return g.TimestampUtilization() >= TimestampWarningThreshold
+}
+
+// LifespanInfo returns comprehensive information about timestamp utilization.
+//
+// This provides a complete snapshot of the generator's lifespan metrics including
+// utilization percentage, remaining time, and overflow date. This is the preferred
+// method for monitoring timestamp health.
+//
+// Performance: ~100ns (multiple time calculations)
+// Thread-safe: Yes, no locks required
+//
+// Example:
+//
+//	info := gen.LifespanInfo()
+//	log.Info("Generator lifespan",
+//	    "utilization", info.Utilization,
+//	    "remaining", info.Remaining,
+//	    "overflow_date", info.OverflowDate,
+//	    "is_approaching", info.IsApproaching)
+func (g *Generator) LifespanInfo() LifespanInfo {
+	// Get current time
+	now := time.Now()
+	currentMillis := now.UnixMilli()
+
+	// Calculate elapsed time since epoch
+	elapsed := currentMillis - g.customEpoch
+	if elapsed < 0 {
+		elapsed = 0
+	}
+
+	// Calculate utilization
+	utilization := float64(elapsed) / float64(MaxTimestamp)
+	if utilization > 1.0 {
+		utilization = 1.0
+	}
+	if utilization < 0.0 {
+		utilization = 0.0
+	}
+
+	// Calculate remaining time
+	remainingMs := MaxTimestamp - elapsed
+	if remainingMs < 0 {
+		remainingMs = 0
+	}
+	remaining := time.Duration(remainingMs) * time.Millisecond
+
+	// Calculate total lifespan (constant)
+	totalLifespan := time.Duration(MaxTimestamp) * time.Millisecond
+
+	// Calculate current age
+	currentAge := time.Duration(elapsed) * time.Millisecond
+
+	// Calculate overflow date
+	epochTime := time.UnixMilli(g.customEpoch)
+	overflowDate := epochTime.Add(totalLifespan)
+
+	// Check if approaching threshold
+	isApproaching := utilization >= TimestampWarningThreshold
+
+	return LifespanInfo{
+		Utilization:   utilization,
+		Remaining:     remaining,
+		TotalLifespan: totalLifespan,
+		CurrentAge:    currentAge,
+		OverflowDate:  overflowDate,
+		IsApproaching: isApproaching,
+	}
 }
 
 // ParseIDComponents extracts timestamp, worker ID, and sequence from a Snowflake ID.
