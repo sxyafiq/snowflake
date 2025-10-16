@@ -1054,3 +1054,172 @@ func TestNewLayoutsHighThroughput(t *testing.T) {
 		})
 	}
 }
+
+// ============================================================================
+// Overflow Detection Tests
+// ============================================================================
+
+// TestTimestampUtilization tests utilization calculation
+func TestTimestampUtilization(t *testing.T) {
+	// Create generator with default epoch (2024-01-01)
+	gen, err := New(1)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	utilization := gen.TimestampUtilization()
+
+	// Should be very small for a newly created generator
+	if utilization < 0.0 || utilization > 1.0 {
+		t.Errorf("TimestampUtilization() = %f, should be in range [0.0, 1.0]", utilization)
+	}
+
+	// For epoch of 2024-01-01, utilization should be very low (< 5%)
+	// In late 2025, ~1.8 years have elapsed, which is ~2.6% of the 69-year lifespan
+	if utilization > 0.05 {
+		t.Errorf("TimestampUtilization() = %f, expected < 0.05 for 2024 epoch", utilization)
+	}
+}
+
+// TestRemainingLifespan tests lifespan calculation
+func TestRemainingLifespan(t *testing.T) {
+	gen, err := New(1)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	remaining := gen.RemainingLifespan()
+
+	// Should be positive and less than total lifespan
+	totalLifespan := time.Duration(MaxTimestamp) * time.Millisecond
+
+	if remaining <= 0 {
+		t.Errorf("RemainingLifespan() = %v, should be positive", remaining)
+	}
+
+	if remaining > totalLifespan {
+		t.Errorf("RemainingLifespan() = %v, should be <= %v", remaining, totalLifespan)
+	}
+}
+
+// TestIsApproachingOverflow tests overflow warning
+func TestIsApproachingOverflow(t *testing.T) {
+	// New generator should not be approaching overflow
+	gen, err := New(1)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if gen.IsApproachingOverflow() {
+		t.Error("IsApproachingOverflow() = true for new generator, expected false")
+	}
+}
+
+// TestLifespanInfo tests comprehensive lifespan information
+func TestLifespanInfo(t *testing.T) {
+	gen, err := New(1)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	info := gen.LifespanInfo()
+
+	// Validate utilization
+	if info.Utilization < 0.0 || info.Utilization > 1.0 {
+		t.Errorf("LifespanInfo.Utilization = %f, should be in range [0.0, 1.0]", info.Utilization)
+	}
+
+	// Validate remaining time (should be positive and <= total lifespan)
+	totalLifespan := time.Duration(MaxTimestamp) * time.Millisecond
+	if info.Remaining <= 0 {
+		t.Errorf("LifespanInfo.Remaining = %v, should be positive", info.Remaining)
+	}
+	if info.Remaining > totalLifespan {
+		t.Errorf("LifespanInfo.Remaining = %v, should be <= total lifespan %v", info.Remaining, totalLifespan)
+	}
+
+	// Validate total lifespan (should be ~69.73 years)
+	if info.TotalLifespan != totalLifespan {
+		t.Errorf("LifespanInfo.TotalLifespan = %v, want %v", info.TotalLifespan, totalLifespan)
+	}
+
+	// Validate current age (should match time elapsed since epoch)
+	epochTime := time.UnixMilli(Epoch)
+	expectedAge := time.Since(epochTime)
+	tolerance := 1 * time.Hour // Allow 1 hour tolerance for test execution
+	if info.CurrentAge < expectedAge-tolerance || info.CurrentAge > expectedAge+tolerance {
+		t.Errorf("LifespanInfo.CurrentAge = %v, expected ~%v (±%v)", info.CurrentAge, expectedAge, tolerance)
+	}
+
+	// Validate overflow date
+	expectedOverflow := epochTime.Add(totalLifespan)
+	if !info.OverflowDate.Equal(expectedOverflow) {
+		t.Errorf("LifespanInfo.OverflowDate = %v, want %v", info.OverflowDate, expectedOverflow)
+	}
+
+	// Validate isApproaching flag
+	if info.IsApproaching {
+		t.Error("LifespanInfo.IsApproaching = true for new generator, expected false")
+	}
+}
+
+// TestLifespanInfoOldEpoch tests with an older epoch approaching overflow
+func TestLifespanInfoOldEpoch(t *testing.T) {
+	// Create a generator with an epoch from 1975 (50 years ago from 2025)
+	// This represents significant utilization: 50/69.73 ≈ 71.7%
+	// Note: Can't go before 1970 as Unix timestamps would be negative
+	oldEpochDate := time.Date(1975, 1, 1, 0, 0, 0, 0, time.UTC)
+	oldEpoch := oldEpochDate.UnixMilli()
+
+	cfg := Config{
+		WorkerID:         1,
+		Epoch:            oldEpoch,
+		MaxClockBackward: 5 * time.Millisecond,
+		EnableMetrics:    true,
+	}
+
+	gen, err := NewWithConfig(cfg)
+	if err != nil {
+		t.Fatalf("NewWithConfig() error = %v", err)
+	}
+
+	info := gen.LifespanInfo()
+
+	// Utilization should be significant (50+ years of a 69-year lifespan)
+	// In 2025, a 1975 epoch means ~50 years elapsed, so ~71.7% utilization
+	if info.Utilization < 0.70 {
+		t.Errorf("LifespanInfo.Utilization = %f, expected >= 0.70 for 1975 epoch", info.Utilization)
+	}
+
+	// Current age should be approximately 50 years
+	expectedAge := time.Since(oldEpochDate)
+	tolerance := 24 * time.Hour
+	if info.CurrentAge < expectedAge-tolerance || info.CurrentAge > expectedAge+tolerance {
+		t.Errorf("LifespanInfo.CurrentAge = %v, expected ~%v for 1975 epoch", info.CurrentAge, expectedAge)
+	}
+
+	// Remaining should be less than total lifespan
+	if info.Remaining >= info.TotalLifespan {
+		t.Errorf("LifespanInfo.Remaining = %v, should be < total lifespan %v", info.Remaining, info.TotalLifespan)
+	}
+}
+
+// TestConstantValues tests that constants are correct
+func TestConstantValues(t *testing.T) {
+	// Verify MaxTimestamp calculation
+	expectedMax := int64((1 << TimestampBits) - 1)
+	if MaxTimestamp != expectedMax {
+		t.Errorf("MaxTimestamp = %d, want %d", MaxTimestamp, expectedMax)
+	}
+
+	// Verify TimestampWarningThreshold
+	if TimestampWarningThreshold != 0.80 {
+		t.Errorf("TimestampWarningThreshold = %f, want 0.80", TimestampWarningThreshold)
+	}
+
+	// Verify timestamp provides ~69 years
+	yearsInMs := MaxTimestamp / (365 * 24 * 60 * 60 * 1000)
+	if yearsInMs < 69 || yearsInMs > 70 {
+		t.Errorf("MaxTimestamp provides %d years, expected ~69", yearsInMs)
+	}
+}
