@@ -856,6 +856,16 @@ func (id ID) ComponentsWithLayout(layout BitLayout) (timestamp int64, workerID i
 }
 
 // ============================================================================
+// Constants for ID validation
+// ============================================================================
+
+const (
+	// DayInMilliseconds is the number of milliseconds in a day.
+	// Used for clock skew tolerance when validating timestamp fields.
+	DayInMilliseconds = 86400000 // 24 * 60 * 60 * 1000
+)
+
+// ============================================================================
 // ID Validation and Comparison
 // ============================================================================
 
@@ -895,7 +905,7 @@ func (id ID) IsValid() bool {
 	}
 
 	// Must not be more than 1 day in the future (allows for clock skew)
-	if ts > now+86400000 {
+	if ts > now+DayInMilliseconds {
 		return false
 	}
 
