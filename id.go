@@ -683,6 +683,8 @@ func ParseIntBytes(b [8]byte) ID {
 // Time returns the timestamp component of the ID as a time.Time.
 //
 // Uses bitshifting to extract the upper 41 bits and converts to time.Time.
+// This method uses LayoutDefault constants for backward compatibility.
+// For IDs generated with other layouts, use TimeWithLayout().
 //
 // Performance: ~30ns (bitshift + time.Unix conversion)
 //
@@ -697,9 +699,34 @@ func (id ID) Time() time.Time {
 	return time.Unix(ms/1000, (ms%1000)*1000000)
 }
 
+// TimeWithLayout returns the timestamp component using a specific bit layout.
+//
+// Use this when extracting components from IDs generated with custom layouts.
+//
+// Performance: ~35ns (dynamic bitshift + time.Unix conversion)
+//
+// Example:
+//
+//	cfg := snowflake.DefaultConfig(42)
+//	cfg.Layout = snowflake.LayoutSuperior
+//	gen, _ := snowflake.NewWithConfig(cfg)
+//	id, _ := gen.GenerateID()
+//	t := id.TimeWithLayout(snowflake.LayoutSuperior)
+func (id ID) TimeWithLayout(layout BitLayout) time.Time {
+	timestampShift, _, _, _ := layout.CalculateShifts()
+
+	// Extract timestamp in time units and convert to milliseconds
+	timeUnits := int64(id) >> timestampShift
+	ms := (timeUnits * layout.TimeUnit.Milliseconds()) + Epoch
+
+	return time.Unix(ms/1000, (ms%1000)*1000000)
+}
+
 // Timestamp returns the timestamp component in milliseconds since Unix epoch.
 //
 // Uses bitshifting to extract the timestamp (upper 41 bits).
+// This method uses LayoutDefault constants for backward compatibility.
+// For IDs generated with other layouts, use TimestampWithLayout().
 //
 // Performance: ~10ns (single bitshift + addition)
 //
@@ -711,9 +738,28 @@ func (id ID) Timestamp() int64 {
 	return (int64(id) >> TimestampShift) + Epoch
 }
 
-// Worker returns the worker ID component (0-1023).
+// TimestampWithLayout returns the timestamp using a specific bit layout.
 //
-// Uses bitshifting and masking to extract the middle 10 bits.
+// Returns milliseconds since Unix epoch.
+//
+// Performance: ~15ns (dynamic bitshift + conversion)
+//
+// Example:
+//
+//	ts := id.TimestampWithLayout(snowflake.LayoutSuperior)
+func (id ID) TimestampWithLayout(layout BitLayout) int64 {
+	timestampShift, _, _, _ := layout.CalculateShifts()
+
+	// Extract timestamp in time units and convert to milliseconds
+	timeUnits := int64(id) >> timestampShift
+	return (timeUnits * layout.TimeUnit.Milliseconds()) + Epoch
+}
+
+// Worker returns the worker ID component.
+//
+// Uses bitshifting and masking to extract the worker ID bits.
+// This method uses LayoutDefault constants (10 bits, 0-1023) for backward compatibility.
+// For IDs generated with other layouts, use WorkerWithLayout().
 //
 // Performance: ~10ns (bitshift + bitwise AND)
 //
@@ -725,24 +771,52 @@ func (id ID) Worker() int64 {
 	return (int64(id) >> WorkerIDShift) & MaxWorkerID
 }
 
-// Sequence returns the sequence number component (0-4095).
+// WorkerWithLayout returns the worker ID using a specific bit layout.
 //
-// Uses bitwise AND to extract the lower 12 bits.
+// Performance: ~12ns (dynamic bitshift + masking)
+//
+// Example:
+//
+//	worker := id.WorkerWithLayout(snowflake.LayoutSuperior)
+func (id ID) WorkerWithLayout(layout BitLayout) int64 {
+	_, workerShift, maxWorker, _ := layout.CalculateShifts()
+	return (int64(id) >> workerShift) & maxWorker
+}
+
+// Sequence returns the sequence number component.
+//
+// Uses bitwise AND to extract the sequence bits.
+// This method uses LayoutDefault constants (12 bits, 0-4095) for backward compatibility.
+// For IDs generated with other layouts, use SequenceWithLayout().
 //
 // Performance: ~5ns (single bitwise AND)
 //
 // Example:
 //
 //	seq := id.Sequence()
-//	fmt.Printf("Sequence in millisecond: %d\n", seq)
+//	fmt.Printf("Sequence in time unit: %d\n", seq)
 func (id ID) Sequence() int64 {
 	return int64(id) & MaxSequence
+}
+
+// SequenceWithLayout returns the sequence number using a specific bit layout.
+//
+// Performance: ~8ns (dynamic masking)
+//
+// Example:
+//
+//	seq := id.SequenceWithLayout(snowflake.LayoutSuperior)
+func (id ID) SequenceWithLayout(layout BitLayout) int64 {
+	_, _, _, maxSequence := layout.CalculateShifts()
+	return int64(id) & maxSequence
 }
 
 // Components returns all three components at once: timestamp, worker ID, and sequence.
 //
 // More efficient than calling Time(), Worker(), and Sequence() separately
 // if you need all three values.
+// This method uses LayoutDefault constants for backward compatibility.
+// For IDs generated with other layouts, use ComponentsWithLayout().
 //
 // Performance: ~15ns (bitshifting + masking)
 //
@@ -758,6 +832,29 @@ func (id ID) Components() (timestamp int64, workerID int64, sequence int64) {
 	return
 }
 
+// ComponentsWithLayout extracts all components using a specific bit layout.
+//
+// More efficient than calling individual *WithLayout() methods if you need all three values.
+//
+// Performance: ~20ns (dynamic bitshifting + masking)
+//
+// Example:
+//
+//	ts, worker, seq := id.ComponentsWithLayout(snowflake.LayoutSuperior)
+//	fmt.Printf("Generated by worker %d at %v with sequence %d\n",
+//	    worker, time.UnixMilli(ts), seq)
+func (id ID) ComponentsWithLayout(layout BitLayout) (timestamp int64, workerID int64, sequence int64) {
+	timestampShift, workerShift, maxWorker, maxSequence := layout.CalculateShifts()
+
+	// Extract timestamp in time units and convert to milliseconds
+	timeUnits := int64(id) >> timestampShift
+	timestamp = (timeUnits * layout.TimeUnit.Milliseconds()) + Epoch
+
+	workerID = (int64(id) >> workerShift) & maxWorker
+	sequence = int64(id) & maxSequence
+	return
+}
+
 // ============================================================================
 // ID Validation and Comparison
 // ============================================================================
@@ -767,8 +864,11 @@ func (id ID) Components() (timestamp int64, workerID int64, sequence int64) {
 // Validates that:
 //   - Timestamp is after the custom epoch (2024-01-01)
 //   - Timestamp is not more than 1 day in the future (allows clock skew)
-//   - Worker ID is in valid range (0-1023)
-//   - Sequence is in valid range (0-4095)
+//   - Worker ID is in valid range (0-1023 for LayoutDefault)
+//   - Sequence is in valid range (0-4095 for LayoutDefault)
+//
+// This method uses LayoutDefault constants for backward compatibility.
+// For IDs generated with other layouts, use IsValidWithLayout().
 //
 // Performance: ~100ns (component extraction + validation)
 //
@@ -808,6 +908,56 @@ func (id ID) IsValid() bool {
 	// Sequence must be valid
 	seq := id.Sequence()
 	if seq < 0 || seq > MaxSequence {
+		return false
+	}
+
+	return true
+}
+
+// IsValidWithLayout validates the ID structure using a specific bit layout.
+//
+// Performance: ~110ns (dynamic extraction + validation)
+//
+// Example:
+//
+//	if id.IsValidWithLayout(snowflake.LayoutSuperior) {
+//	    fmt.Println("ID is structurally valid for LayoutSuperior")
+//	}
+func (id ID) IsValidWithLayout(layout BitLayout) bool {
+	// Zero and negative IDs are invalid
+	if id <= 0 {
+		return false
+	}
+
+	// Validate layout first
+	if err := layout.Validate(); err != nil {
+		return false
+	}
+
+	// Extract components using layout
+	ts, worker, seq := id.ComponentsWithLayout(layout)
+	now := time.Now().UnixMilli()
+
+	// Must be after epoch
+	if ts <= Epoch {
+		return false
+	}
+
+	// Must not be more than 1 day in the future (allows for clock skew)
+	if ts > now+86400000 {
+		return false
+	}
+
+	// Get max values from layout
+	_, _, maxWorker, maxSequence := layout.CalculateShifts()
+
+	// Worker ID must be valid
+	if worker < 0 || worker > maxWorker {
+		return false
+	}
+
+	// Sequence must be valid
+	if seq < 0 || seq > maxSequence {
 		return false
 	}
 
