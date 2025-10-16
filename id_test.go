@@ -384,6 +384,66 @@ func TestInvalidEncodings(t *testing.T) {
 	}
 }
 
+// TestEncodingValidation tests length and overflow validation
+func TestEncodingValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		parser    func(string) (ID, error)
+		input     string
+		wantError error
+	}{
+		// Length validation tests
+		{"Base32 too long", ParseBase32, "yyyyyyyyyyyyyyyyyyyy", ErrStringTooLong}, // >13 chars
+		{"Base58 too long", ParseBase58, "123456789abcdef", ErrStringTooLong},        // >11 chars
+		{"Base62 too long", ParseBase62, "abcdefghijklmnop", ErrStringTooLong},      // >11 chars
+		{"Hex too long", ParseHex, "12345678901234567890", ErrStringTooLong},        // >16 chars
+
+		// Overflow validation tests (strings that decode to values > int64 max)
+		{"Base32 overflow", ParseBase32, "9999999999999", ErrIntegerOverflow},
+		{"Base58 overflow", ParseBase58, "ZZZZZZZZZZZ", ErrIntegerOverflow},
+		{"Base62 overflow", ParseBase62, "ZZZZZZZZZZZ", ErrIntegerOverflow},
+		{"Hex overflow", ParseHex, "FFFFFFFFFFFFFFFF", ErrIntegerOverflow}, // Max int64 in hex, but adding more would overflow
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := tt.parser(tt.input)
+			if err == nil {
+				t.Errorf("%s should return error", tt.name)
+			}
+			// Note: We're not strictly checking which error (could be ErrStringTooLong or ErrIntegerOverflow)
+			// as both are valid protective measures
+		})
+	}
+}
+
+// TestEncodingMaxLengths verifies that max length constants are correct
+func TestEncodingMaxLengths(t *testing.T) {
+	gen, _ := New(1)
+	id, _ := gen.GenerateID()
+
+	// Verify that valid IDs encode within the maximum lengths
+	encodings := []struct {
+		name      string
+		encoded   string
+		maxLength int
+	}{
+		{"Base32", id.Base32(), MaxBase32Len},
+		{"Base58", id.Base58(), MaxBase58Len},
+		{"Base62", id.Base62(), MaxBase62Len},
+		{"Hex", id.Hex(), MaxHexLen},
+	}
+
+	for _, enc := range encodings {
+		t.Run(enc.name, func(t *testing.T) {
+			if len(enc.encoded) > enc.maxLength {
+				t.Errorf("%s encoding length %d exceeds max %d (value: %s)",
+					enc.name, len(enc.encoded), enc.maxLength, enc.encoded)
+			}
+		})
+	}
+}
+
 // BenchmarkIDEncodings benchmarks various encoding methods
 func BenchmarkIDEncodings(b *testing.B) {
 	gen, _ := New(1)

@@ -26,15 +26,26 @@ import (
 	"errors"
 )
 
+// Maximum string lengths for each encoding format (for int64).
+// These limits prevent DoS attacks from extremely long inputs.
+const (
+	MaxBase32Len = 13 // ceil(64 / 5) = 13 chars for 64-bit int
+	MaxBase58Len = 11 // ceil(log58(2^64)) ≈ 11 chars
+	MaxBase62Len = 11 // ceil(log62(2^64)) ≈ 11 chars
+	MaxHexLen    = 16 // ceil(64 / 4) = 16 chars for 64-bit int
+)
+
 // Encoding errors returned when parsing invalid encoded strings.
 var (
-	ErrInvalidBase2  = errors.New("invalid base2 encoding")
-	ErrInvalidBase32 = errors.New("invalid base32 encoding")
-	ErrInvalidBase36 = errors.New("invalid base36 encoding")
-	ErrInvalidBase58 = errors.New("invalid base58 encoding")
-	ErrInvalidBase62 = errors.New("invalid base62 encoding")
-	ErrInvalidBase64 = errors.New("invalid base64 encoding")
-	ErrInvalidHex    = errors.New("invalid hexadecimal encoding")
+	ErrInvalidBase2     = errors.New("invalid base2 encoding")
+	ErrInvalidBase32    = errors.New("invalid base32 encoding")
+	ErrInvalidBase36    = errors.New("invalid base36 encoding")
+	ErrInvalidBase58    = errors.New("invalid base58 encoding")
+	ErrInvalidBase62    = errors.New("invalid base62 encoding")
+	ErrInvalidBase64    = errors.New("invalid base64 encoding")
+	ErrInvalidHex       = errors.New("invalid hexadecimal encoding")
+	ErrStringTooLong    = errors.New("encoded string exceeds maximum length")
+	ErrIntegerOverflow  = errors.New("decoded value would overflow int64")
 )
 
 // Base32 uses z-base-32 character set (Douglas Crockford's design).
@@ -146,9 +157,15 @@ func encodeBase32(id int64) string {
 // This avoids string searching and is cache-friendly.
 //
 // Performance: O(len(s)) with O(1) lookups
-// Validation: Returns error on invalid characters
+// Validation: Returns error on invalid characters, excessive length, or overflow
 func decodeBase32(s string) (int64, error) {
+	// Validate string length to prevent DoS
+	if len(s) > MaxBase32Len {
+		return -1, ErrStringTooLong
+	}
+
 	var id int64
+	const maxSafeValue = (1<<63 - 1) >> 5 // Maximum value before next shift would overflow
 
 	// Process each character with O(1) lookup
 	for i := 0; i < len(s); i++ {
@@ -156,6 +173,12 @@ func decodeBase32(s string) (int64, error) {
 		if decodeBase32Map[s[i]] == 0xFF {
 			return -1, ErrInvalidBase32
 		}
+
+		// Check for overflow before shifting
+		if id > maxSafeValue {
+			return -1, ErrIntegerOverflow
+		}
+
 		// Shift left by 5 bits and add new value
 		id = (id << 5) + int64(decodeBase32Map[s[i]])
 	}
@@ -207,9 +230,15 @@ func encodeBase58(id int64) string {
 // Validates that all characters are in the base58 alphabet.
 //
 // Performance: O(len(s)) with O(1) lookups
-// Validation: Returns error on invalid characters (including 0, O, I, l)
+// Validation: Returns error on invalid characters, excessive length, or overflow
 func decodeBase58(s string) (int64, error) {
+	// Validate string length to prevent DoS
+	if len(s) > MaxBase58Len {
+		return -1, ErrStringTooLong
+	}
+
 	var id int64
+	const maxSafeValue = (1<<63 - 1) / 58 // Maximum value before next multiply would overflow
 
 	// Process each character with O(1) lookup
 	for i := 0; i < len(s); i++ {
@@ -217,6 +246,12 @@ func decodeBase58(s string) (int64, error) {
 		if decodeBase58Map[s[i]] == 0xFF {
 			return -1, ErrInvalidBase58
 		}
+
+		// Check for overflow before multiplying
+		if id > maxSafeValue {
+			return -1, ErrIntegerOverflow
+		}
+
 		// Multiply by base and add new digit
 		id = id*58 + int64(decodeBase58Map[s[i]])
 	}
@@ -268,9 +303,15 @@ func encodeBase62(id int64) string {
 // Validates that all characters are alphanumeric (0-9, a-z, A-Z).
 //
 // Performance: O(len(s)) with O(1) lookups
-// Validation: Returns error on invalid characters or non-alphanumeric input
+// Validation: Returns error on invalid characters, excessive length, or overflow
 func decodeBase62(s string) (int64, error) {
+	// Validate string length to prevent DoS
+	if len(s) > MaxBase62Len {
+		return -1, ErrStringTooLong
+	}
+
 	var id int64
+	const maxSafeValue = (1<<63 - 1) / 62 // Maximum value before next multiply would overflow
 
 	// Process each character with O(1) lookup
 	for i := 0; i < len(s); i++ {
@@ -278,6 +319,12 @@ func decodeBase62(s string) (int64, error) {
 		if decodeBase62Map[s[i]] == 0xFF {
 			return -1, ErrInvalidBase62
 		}
+
+		// Check for overflow before multiplying
+		if id > maxSafeValue {
+			return -1, ErrIntegerOverflow
+		}
+
 		// Multiply by base and add new digit
 		id = id*62 + int64(decodeBase62Map[s[i]])
 	}
@@ -322,9 +369,15 @@ func encodeHex(id int64) string {
 // Supports both uppercase and lowercase hexadecimal characters.
 //
 // Performance: O(len(s)) with O(1) lookups
-// Validation: Returns error on invalid characters
+// Validation: Returns error on invalid characters, excessive length, or overflow
 func decodeHex(s string) (int64, error) {
+	// Validate string length to prevent DoS
+	if len(s) > MaxHexLen {
+		return -1, ErrStringTooLong
+	}
+
 	var id int64
+	const maxSafeValue = (1<<63 - 1) >> 4 // Maximum value before next shift would overflow
 
 	// Process each character with O(1) lookup
 	for i := 0; i < len(s); i++ {
@@ -332,6 +385,12 @@ func decodeHex(s string) (int64, error) {
 		if decodeHexMap[s[i]] == 0xFF {
 			return -1, ErrInvalidHex
 		}
+
+		// Check for overflow before shifting
+		if id > maxSafeValue {
+			return -1, ErrIntegerOverflow
+		}
+
 		// Shift left by 4 bits and add new value
 		id = (id << 4) + int64(decodeHexMap[s[i]])
 	}
