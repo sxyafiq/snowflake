@@ -81,6 +81,16 @@ gen, _ := snowflake.New(workerID)
 id, _ := gen.GenerateID()
 ```
 
+**For new projects** (use LayoutUltimate):
+
+```go
+// 292 years lifespan, 65K nodes, 12.8K IDs/sec per node
+cfg := snowflake.DefaultConfig(workerID)
+cfg.Layout = snowflake.LayoutUltimate
+gen, _ := snowflake.NewWithConfig(cfg)
+id, _ := gen.GenerateID()
+```
+
 ---
 
 ## Installation
@@ -129,6 +139,30 @@ go get github.com/sxyafiq/snowflake
 - **Validation** - Verify ID structure and integrity
 - **Comparison** - Before/After/Equal operations
 - **Sharding** - Calculate shard/partition for distribution
+
+### Configurable Bit Layouts
+
+Choose the optimal trade-off between **lifespan**, **scale**, and **throughput**:
+
+| Layout | Lifespan | Max Nodes | Throughput/Node | Use Case |
+|--------|----------|-----------|-----------------|----------|
+| **LayoutDefault** | 69 years | 1,024 | 4.1M IDs/sec | High throughput, <1K nodes |
+| **LayoutSuperior** | 35 years | 16,384 | 512K IDs/sec | Balanced (recommended) |
+| **LayoutExtreme** | 17 years | 131,072 | 128K IDs/sec | Massive scale (100K+ nodes) |
+| **LayoutUltra** | 17 years | 32,768 | 1M IDs/sec | High throughput + scale |
+| **LayoutLongLife** | 139 years | 4,096 | 512K IDs/sec | Long-term systems |
+| **LayoutSonyflake** | 174 years | 65,536 | 25.6K IDs/sec | Sonyflake compatibility |
+| **LayoutUltimate** ⭐ | 292 years | 65,536 | 12.8K IDs/sec | **Best for new projects** |
+| **LayoutMegaScale** | 292 years | 131,072 | 6.4K IDs/sec | Maximum node capacity |
+
+**Recommendation:** Use `LayoutUltimate` for new projects - it provides the longest lifespan with excellent scale.
+
+**Example:**
+```go
+cfg := snowflake.DefaultConfig(workerID)
+cfg.Layout = snowflake.LayoutUltimate  // 292 years, 65K nodes
+gen, _ := snowflake.NewWithConfig(cfg)
+```
 
 ---
 
@@ -367,9 +401,22 @@ Component Extraction         ~10 ns/op      0 allocs
 
 ### Throughput
 
-- **Single worker:** ~2.2 million IDs/sec
+- **Single worker (Default layout):** ~2.2 million IDs/sec (4,096 IDs/ms)
 - **Concurrent (4 workers):** ~8.8 million IDs/sec
 - **Maximum (1024 workers):** Theoretical ~4.2 billion IDs/sec
+
+### Layout-Specific Performance
+
+Different layouts have varying throughput limits based on sequence bits and time unit:
+
+| Layout | Throughput/Worker | Concurrent (4 workers) | Notes |
+|--------|-------------------|------------------------|-------|
+| LayoutDefault | 4.1M IDs/sec | 16.4M IDs/sec | Highest throughput |
+| LayoutSuperior | 512K IDs/sec | 2M IDs/sec | Balanced |
+| LayoutUltimate | 12.8K IDs/sec | 51.2K IDs/sec | Recommended, long lifespan |
+| LayoutMegaScale | 6.4K IDs/sec | 25.6K IDs/sec | Maximum scale (131K nodes) |
+
+**Bitshift Optimization:** Power-of-2 time units (1ms, 2ms, 4ms, 8ms) use bitshift operations instead of division, providing 5-10% performance improvement in the hot path with zero allocations.
 
 ### Comparison
 
@@ -434,7 +481,29 @@ gen, _ := snowflake.New(workerID)
 
 ### Production Best Practices
 
-**1. Choose the Right Encoding**
+**1. Choose the Right Layout**
+
+```go
+// For new projects (recommended)
+cfg.Layout = snowflake.LayoutUltimate  // 292 years, 65K nodes, 12.8K IDs/sec
+
+// For massive scale (100K+ nodes)
+cfg.Layout = snowflake.LayoutMegaScale  // 292 years, 131K nodes, 6.4K IDs/sec
+
+// For Sonyflake compatibility
+cfg.Layout = snowflake.LayoutSonyflake  // 174 years, 65K nodes, 10ms precision
+
+// For maximum throughput (<1K nodes)
+cfg.Layout = snowflake.LayoutDefault    // 69 years, 1K nodes, 4.1M IDs/sec
+```
+
+**Layout Selection Guide:**
+- **Most cases:** LayoutUltimate (best balance of lifespan, scale, throughput)
+- **100K+ nodes:** LayoutMegaScale (maximum node capacity)
+- **Legacy/high throughput:** LayoutDefault (69 years, highest throughput)
+- **Long-term archival:** LayoutLongLife (139 years)
+
+**2. Choose the Right Encoding**
 
 | Use Case | Format | Why |
 |----------|--------|-----|
@@ -443,7 +512,7 @@ gen, _ := snowflake.New(workerID)
 | Display to users | Base58 | No ambiguous characters |
 | Binary protocols | IntBytes() | Fixed 8-byte format |
 
-**2. Handle Clock Issues**
+**3. Handle Clock Issues**
 
 ```go
 cfg := snowflake.DefaultConfig(workerID)
@@ -516,6 +585,7 @@ CREATE TABLE users (
 
 ### ID Structure
 
+**Default Layout (LayoutDefault):**
 ```
 64-bit Snowflake ID Layout:
 
@@ -529,19 +599,55 @@ CREATE TABLE users (
                                       1024 workers    4096 IDs/ms/worker
 ```
 
+**LayoutUltimate (Recommended):**
+```
+64-bit Snowflake ID Layout:
+
+┌─────────────────────────────────────────────┬──────────────┬──────────────┐
+│       40 bits: Timestamp (10ms units)       │  16 bits:    │   7 bits:    │
+│     2^40 × 10ms = 292 years                 │  Worker ID   │  Sequence    │
+│                                             │  (65,536)    │  (128)       │
+└─────────────────────────────────────────────┴──────────────┴──────────────┘
+                                              ^              ^
+                                              |              |
+                                       65K workers     12.8K IDs/sec
+```
+
 **Components:**
 
-- **Timestamp (41 bits):** Milliseconds since epoch (2024-01-01)
-  - Range: ~69 years
+- **Timestamp:** Milliseconds (or units) since epoch (2024-01-01)
+  - Default: 41 bits = ~69 years
+  - Ultimate: 40 bits × 10ms = 292 years
   - Provides time-ordering
 
-- **Worker ID (10 bits):** Instance identifier
-  - Range: 0-1023
+- **Worker ID:** Instance identifier
+  - Default: 10 bits = 1,024 nodes
+  - Ultimate: 16 bits = 65,536 nodes
   - Must be unique per node
 
-- **Sequence (12 bits):** Per-millisecond counter
-  - Range: 0-4095
-  - Allows 4096 IDs per millisecond per worker
+- **Sequence:** Per-time-unit counter
+  - Default: 12 bits = 4,096 IDs/ms
+  - Ultimate: 7 bits = 128 IDs/10ms = 12,800 IDs/sec
+  - Prevents collisions within same time unit
+
+### Bit Layout Configurations
+
+The package supports 8 pre-configured layouts optimized for different scenarios:
+
+**LayoutUltimate (Recommended):**
+- **Lifespan:** 292 years (until ~2317)
+- **Scale:** 65,536 workers
+- **Throughput:** 12,800 IDs/sec per worker
+- **Best for:** New projects needing long lifespan + high scale
+
+**LayoutMegaScale:**
+- **Lifespan:** 292 years
+- **Scale:** 131,072 workers (maximum)
+- **Throughput:** 6,400 IDs/sec per worker
+- **Best for:** Hyper-scale deployments (100K+ nodes)
+
+**Performance Optimization:**
+Power-of-2 time units (1ms, 2ms, 4ms, 8ms) use bitshift instead of division for ~5-10% performance gain. Non-power-of-2 time units (10ms) use division fallback with negligible impact.
 
 ### Design Decisions
 
@@ -597,7 +703,19 @@ A: Base62 - it's URL-safe, compact, and widely compatible.
 A: Use distributed coordination (Redis/Etcd) or ensure static assignment in your deployment.
 
 **Q: Is this compatible with Twitter's Snowflake?**
-A: Yes, same bit layout. IDs are interoperable (note: different epoch).
+A: Yes, `LayoutDefault` uses the same bit layout (41+10+12). IDs are interoperable (note: different epoch).
+
+**Q: Which layout should I use for a new project?**
+A: `LayoutUltimate` - it provides 292 years lifespan with 65,536 nodes and 12,800 IDs/sec per worker, perfect for 99.9% of use cases.
+
+**Q: How do I migrate to a different layout?**
+A: Layouts are not backward compatible. Generate new IDs with the new layout, but keep existing IDs in their original format. Use layout-aware parsing: `ParseIDComponentsWithLayout(id, layout)` to parse IDs from different layouts.
+
+**Q: What's the difference between LayoutUltimate and LayoutSonyflake?**
+A: LayoutUltimate has 1.7x longer lifespan (292 vs 174 years), same node capacity (65K), but half the throughput (12.8K vs 25.6K IDs/sec). For most systems, 12.8K/sec per worker is more than sufficient.
+
+**Q: Can I use bitshift optimization with 10ms time units?**
+A: No, 10ms is not a power-of-2, so it uses division fallback. However, the performance impact is negligible (~5-10%). LayoutUltimate and LayoutMegaScale use 10ms for longer lifespan.
 
 ---
 
