@@ -178,6 +178,8 @@ func DefaultConfig(workerID int64) Config {
 //   - WorkerID must be in range allowed by layout
 //   - Epoch must be positive
 //   - MaxClockBackward must be non-negative
+//
+// Returns ConfigError with detailed context for easier debugging.
 func (c *Config) Validate() error {
 	// Default to LayoutDefault if layout is zero-valued (backward compatibility)
 	if c.Layout.TimestampBits == 0 && c.Layout.WorkerBits == 0 && c.Layout.SequenceBits == 0 {
@@ -191,14 +193,30 @@ func (c *Config) Validate() error {
 
 	// Validate worker ID against layout's capacity
 	if err := c.Layout.ValidateWorkerID(c.WorkerID); err != nil {
-		return err
+		_, _, maxWorker, _ := c.Layout.CalculateShifts()
+		return newConfigError(
+			"WorkerID",
+			fmt.Sprintf("%d", c.WorkerID),
+			"out of valid range for layout",
+			fmt.Sprintf("must be between 0 and %d (%d bits)", maxWorker, c.Layout.WorkerBits),
+		)
 	}
 
 	if c.Epoch <= 0 {
-		return fmt.Errorf("%w: epoch must be positive", ErrInvalidConfig)
+		return newConfigError(
+			"Epoch",
+			fmt.Sprintf("%d", c.Epoch),
+			"must be positive",
+			"epoch timestamp in milliseconds must be > 0",
+		)
 	}
 	if c.MaxClockBackward < 0 {
-		return fmt.Errorf("%w: max clock backward must be non-negative", ErrInvalidConfig)
+		return newConfigError(
+			"MaxClockBackward",
+			c.MaxClockBackward.String(),
+			"must be non-negative",
+			"duration must be >= 0",
+		)
 	}
 	return nil
 }
@@ -476,10 +494,13 @@ func (g *Generator) generateInt64WithContext(ctx context.Context) (int64, error)
 		// Still behind after waiting? Clock issue is too severe
 		if timestamp < g.lastTimestamp {
 			g.clockBackwardErr.Add(1)
-			diffMs := (g.lastTimestamp - timestamp) * g.timeUnit.Milliseconds()
-			return 0, fmt.Errorf("%w: current=%d last=%d diff=%dms (tolerance=%dms)",
-				ErrClockMovedBack, timestamp, g.lastTimestamp,
-				diffMs, g.maxClockBackward.Milliseconds())
+			return 0, newClockError(
+				timestamp,
+				g.lastTimestamp,
+				g.maxClockBackward.Milliseconds(),
+				g.workerID,
+				false, // Not recovered
+			)
 		}
 	}
 
