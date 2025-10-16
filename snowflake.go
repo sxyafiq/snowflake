@@ -193,7 +193,13 @@ func (c *Config) Validate() error {
 
 	// Validate worker ID against layout's capacity
 	if err := c.Layout.ValidateWorkerID(c.WorkerID); err != nil {
-		return err
+		_, _, maxWorker, _ := c.Layout.CalculateShifts()
+		return newConfigError(
+			"WorkerID",
+			fmt.Sprintf("%d", c.WorkerID),
+			"out of valid range for layout",
+			fmt.Sprintf("must be between 0 and %d (%d bits)", maxWorker, c.Layout.WorkerBits),
+		)
 	}
 
 	if c.Epoch <= 0 {
