@@ -444,39 +444,49 @@ func TestEncodingMaxLengths(t *testing.T) {
 	}
 }
 
+// Package-level variable to prevent compiler optimizations in benchmarks
+var benchResult string
+
 // BenchmarkIDEncodings benchmarks various encoding methods
 func BenchmarkIDEncodings(b *testing.B) {
 	gen, _ := New(1)
 	id, _ := gen.GenerateID()
 
+	var result string
+
 	b.Run("String", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			_ = id.String()
+			result = id.String()
 		}
+		benchResult = result
 	})
 
 	b.Run("Base32", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			_ = id.Base32()
+			result = id.Base32()
 		}
+		benchResult = result
 	})
 
 	b.Run("Base58", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			_ = id.Base58()
+			result = id.Base58()
 		}
+		benchResult = result
 	})
 
 	b.Run("Base62", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			_ = id.Base62()
+			result = id.Base62()
 		}
+		benchResult = result
 	})
 
 	b.Run("Hex", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			_ = id.Hex()
+			result = id.Hex()
 		}
+		benchResult = result
 	})
 }
 
