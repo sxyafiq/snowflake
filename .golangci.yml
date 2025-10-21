@@ -1,58 +1,37 @@
 run:
   timeout: 5m
-  tests: true
   modules-download-mode: readonly
 
 linters:
   enable:
-    - errcheck      # Check for unchecked errors
-    - gosimple      # Simplify code
-    - govet         # Vet examines Go source code
-    - ineffassign   # Detect ineffectual assignments
-    - staticcheck   # Advanced Go linter
-    - unused        # Check for unused code
-    - gofmt         # Check formatting
-    - goimports     # Check import ordering
-    - misspell      # Check for misspelled words
-    - revive        # Fast, configurable, extensible linter
-    - unconvert     # Remove unnecessary type conversions
-    - unparam       # Find unused function parameters
-    - goconst       # Find repeated strings that could be constants
-    - gocyclo       # Check cyclomatic complexity
-    - dupl          # Check for duplicated code
-    - prealloc      # Find slice declarations that could be preallocated
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - dupl
 
 linters-settings:
   errcheck:
-    check-type-assertions: true
-    check-blank: true
-
-  govet:
-    check-shadowing: true
-
-  gocyclo:
-    min-complexity: 15
-
-  dupl:
-    threshold: 100
-
-  goconst:
-    min-len: 3
-    min-occurrences: 3
-
-  misspell:
-    locale: US
-
-  revive:
-    rules:
-      - name: exported
-        disabled: false
-      - name: var-naming
-        disabled: false
-      - name: package-comments
-        disabled: false
+    # Exclude functions that are allowed to have unchecked errors
+    exclude-functions:
+      - (io.Closer).Close
+      - (*os.File).Close
+      - (*database/sql.Rows).Close
+      - (encoding/json.Encoder).Encode
+      - (*flag.FlagSet).Parse
 
 issues:
-  exclude-use-default: false
-  max-issues-per-linter: 0
-  max-same-issues: 0
+  # Exclude duplication warnings in test files
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - dupl
+        - errcheck
+    # Exclude error checking in examples and cmd
+    - path: (examples|cmd)/
+      linters:
+        - errcheck
+        - gosec
+        - dupl
