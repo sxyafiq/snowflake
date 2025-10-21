@@ -248,7 +248,8 @@ type Event struct {
 }
 
 func main() {
-	fmt.Println("=== Time-Series Partitioning Example ===\n")
+	fmt.Println("=== Time-Series Partitioning Example ===")
+	fmt.Println()
 
 	ctx := context.Background()
 

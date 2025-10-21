@@ -315,7 +315,8 @@ func createSchema(db *sql.DB) error {
 }
 
 func main() {
-	fmt.Println("=== Snowflake Database Sharding Example ===\n")
+	fmt.Println("=== Snowflake Database Sharding Example ===")
+	fmt.Println()
 
 	// Test all three sharding strategies
 	strategies := []ShardStrategy{
