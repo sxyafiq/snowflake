@@ -1143,14 +1143,6 @@ func (g *Generator) currentTimestamp() int64 {
 	return currentUnits
 }
 
-// waitNextMillis waits for the next time unit with efficient sleeping.
-//
-// Uses a hybrid approach: calculated sleep for most of the wait,
-// then busy-wait with yielding for final precision.
-func (g *Generator) waitNextMillis(currentTime int64) int64 {
-	return g.waitNextMillisWithContextInternal(context.Background(), currentTime)
-}
-
 // waitNextMillisWithContext waits for the next time unit with context support.
 //
 // Returns error if context is canceled during wait.
