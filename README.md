@@ -103,6 +103,30 @@ go get github.com/sxyafiq/snowflake
 - Go 1.21 or higher
 - No external dependencies
 
+### Command-Line Tool
+
+A powerful CLI tool is included for quick ID generation, parsing, and utilities:
+
+```bash
+# Install the CLI
+go install ./cmd/snowflake
+
+# Generate IDs
+snowflake generate --worker 42
+snowflake generate --count 10 --format base62 --worker 42
+
+# Parse and inspect IDs
+snowflake parse 1234567890123456789
+
+# Convert between formats
+snowflake encode 1234567890123456789 base62
+
+# Run benchmarks
+snowflake bench --duration 5s --worker 42
+```
+
+See [cmd/snowflake/README.md](./cmd/snowflake/README.md) for full CLI documentation.
+
 ---
 
 ## Features
