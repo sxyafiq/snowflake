@@ -139,12 +139,9 @@ func FuzzIDTime(f *testing.F) {
 		// Get time
 		idTime := id.Time()
 
-		// Time should be after Unix epoch (1970)
+		// Time should be after Unix epoch (1970) - just ensure it doesn't panic
 		unixEpoch := time.Unix(0, 0)
-		if idTime.Before(unixEpoch) {
-			// This is valid - the ID might have a timestamp before actual generation time
-			// Just ensure it doesn't panic
-		}
+		_ = idTime.Before(unixEpoch) // Check that Before() doesn't panic
 
 		// Age should be calculable without panic
 		age := id.Age()
@@ -386,14 +383,8 @@ func FuzzIDValidation(f *testing.F) {
 		isValid := id.IsValid()
 
 		// Zero and negative IDs should be invalid
-		if idVal <= 0 && isValid {
-			// Actually, let's check the implementation to see what's considered valid
-			// For now, just ensure no panic
-		}
-
-		// Very small positive values might not be valid Snowflake IDs
-		// The validation should be consistent
-		_ = isValid
+		// Just verify that IsValid doesn't panic for any value
+		_ = isValid // Intentionally check all values without specific assertions
 	})
 }
 
