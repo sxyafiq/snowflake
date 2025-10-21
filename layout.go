@@ -342,7 +342,15 @@ func (l BitLayout) CalculateCapacity() LayoutCapacity {
 	// (40 bits * 10ms would overflow int64 when multiplied in nanoseconds)
 	totalTimeUnits := float64(maxTimestamp)
 	totalSeconds := totalTimeUnits * l.TimeUnit.Seconds()
-	lifespan := time.Duration(totalSeconds * float64(time.Second))
+	totalNanoseconds := totalSeconds * float64(time.Second)
+
+	// Cap at maximum time.Duration value (~292 years)
+	// time.Duration is int64 nanoseconds, max value is math.MaxInt64
+	const maxDuration = float64(1<<63 - 1) // math.MaxInt64
+	if totalNanoseconds > maxDuration {
+		totalNanoseconds = maxDuration
+	}
+	lifespan := time.Duration(totalNanoseconds)
 
 	// Calculate throughput per worker
 	idsPerTimeUnit := maxSequence
