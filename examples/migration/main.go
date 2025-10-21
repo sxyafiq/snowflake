@@ -119,7 +119,8 @@ func (s *UserService) createUserDualWrite(ctx context.Context, name, email strin
 // GetUserByUUID retrieves a user by UUID
 func (s *UserService) GetUserByUUID(ctx context.Context, userUUID uuid.UUID) (*User, error) {
 	var user User
-	var uuidStr, snowflakeIDNull sql.NullInt64
+	var uuidStr sql.NullString
+	var snowflakeIDNull sql.NullInt64
 
 	err := s.db.QueryRowContext(ctx,
 		"SELECT uuid, snowflake_id, name, email, created_at FROM users WHERE uuid = ?",
@@ -129,7 +130,7 @@ func (s *UserService) GetUserByUUID(ctx context.Context, userUUID uuid.UUID) (*U
 		return nil, err
 	}
 
-	user.UUID = uuid.MustParse(uuidStr)
+	user.UUID = uuid.MustParse(uuidStr.String)
 	if snowflakeIDNull.Valid {
 		user.SnowflakeID = snowflake.ID(snowflakeIDNull.Int64)
 	}
