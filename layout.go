@@ -9,7 +9,6 @@ package snowflake
 import (
 	"errors"
 	"fmt"
-	"math"
 	"time"
 )
 
@@ -347,11 +346,12 @@ func (l BitLayout) CalculateCapacity() LayoutCapacity {
 
 	// Cap at maximum time.Duration value (~292 years)
 	// time.Duration is int64 nanoseconds, max value is math.MaxInt64
-	maxDuration := float64(math.MaxInt64)
+	// Use a slightly smaller value to avoid float64 precision issues
+	const maxDuration = 9.223372036854775e+18 // Slightly less than math.MaxInt64
 	if totalNanoseconds > maxDuration {
 		totalNanoseconds = maxDuration
 	}
-	lifespan := time.Duration(totalNanoseconds)
+	lifespan := time.Duration(int64(totalNanoseconds))
 
 	// Calculate throughput per worker
 	idsPerTimeUnit := maxSequence
