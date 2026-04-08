@@ -684,10 +684,13 @@ func (g *Generator) GenerateBatch(ctx context.Context, count int) ([]ID, error) 
 
 			diff := g.lastTimestamp - timestamp
 
+			// Convert tolerance to time units for comparison
+			toleranceInTimeUnits := g.maxClockBackward.Milliseconds() / g.timeUnit.Milliseconds()
+
 			// If drift is small (within tolerance), wait it out
-			if diff <= g.maxClockBackward.Milliseconds() {
+			if diff <= toleranceInTimeUnits {
 				waitStart := time.Now()
-				sleepDuration := time.Duration(diff) * time.Millisecond
+				sleepDuration := time.Duration(diff) * g.timeUnit
 
 				// Unlock mutex during sleep to allow other operations
 				g.mu.Unlock()
@@ -713,9 +716,9 @@ func (g *Generator) GenerateBatch(ctx context.Context, count int) ([]ID, error) 
 
 		// Same millisecond as last ID: increment sequence
 		if timestamp == g.lastTimestamp {
-			g.sequence = (g.sequence + 1) & MaxSequence
+			g.sequence = (g.sequence + 1) & g.maxSequence
 
-			// Sequence overflow: exhausted all 4096 IDs this millisecond
+			// Sequence overflow: exhausted all IDs for this time unit
 			if g.sequence == 0 {
 				g.sequenceOverflow.Add(1)
 				// Wait for next millisecond
@@ -737,9 +740,9 @@ func (g *Generator) GenerateBatch(ctx context.Context, count int) ([]ID, error) 
 
 		g.lastTimestamp = timestamp
 
-		// Compose ID using bitshifting
-		id := ((timestamp - g.customEpoch) << TimestampShift) |
-			(g.workerID << WorkerIDShift) |
+		// Compose ID using dynamic bitshifting based on layout
+		id := ((timestamp - g.customEpoch) << g.timestampShift) |
+			(g.workerID << g.workerShift) |
 			g.sequence
 
 		ids = append(ids, ID(id))
