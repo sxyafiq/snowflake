@@ -52,11 +52,30 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// maxDurationMs is the largest millisecond count that fits in time.Duration
+// (which stores nanoseconds in an int64). Used to clamp lifespan totals for
+// layouts whose theoretical span exceeds ~292 years (e.g. LayoutUltimate's
+// 40-bit timestamp × 10ms ≈ 349 years).
+const maxDurationMs = int64(math.MaxInt64) / int64(time.Millisecond)
+
+// msToDuration converts milliseconds to time.Duration, clamping at
+// math.MaxInt64 nanoseconds to avoid overflow for very large spans.
+func msToDuration(ms int64) time.Duration {
+	if ms < 0 {
+		return 0
+	}
+	if ms >= maxDurationMs {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(ms) * time.Millisecond
+}
 
 const (
 	// Epoch is the custom epoch (January 1, 2024 00:00:00 UTC) in milliseconds.
@@ -311,7 +330,8 @@ type LifespanInfo struct {
 type Generator struct {
 	mu               sync.Mutex    // Protects mutable state (sequence, lastTimestamp)
 	epoch            time.Time     // Monotonic clock reference (set at initialization)
-	customEpoch      int64         // Custom epoch in milliseconds
+	customEpoch      int64         // Custom epoch in time units (used in ID composition)
+	customEpochMs    int64         // Custom epoch in milliseconds (used for lifespan math)
 	workerID         int64         // Worker ID for this generator
 	sequence         int64         // Current sequence number within this time unit
 	lastTimestamp    int64         // Last timestamp we generated an ID for
@@ -322,6 +342,7 @@ type Generator struct {
 	workerShift    int           // Bits to shift worker ID left
 	maxWorker      int64         // Maximum valid worker ID for this layout
 	maxSequence    int64         // Maximum sequence value for this layout
+	maxTimestamp   int64         // Maximum timestamp value (in time units) for this layout
 	timeUnit       time.Duration // Time unit for timestamp precision
 	timeUnitShift  int8          // Bitshift for time unit conversion (or -1 for division)
 
@@ -405,13 +426,19 @@ func NewWithConfig(cfg Config) (*Generator, error) {
 	// This enables bitshift instead of division for power-of-2 time units
 	timeUnitShift := cfg.Layout.TimeUnitShift()
 
-	// Convert custom epoch from milliseconds to time units
-	// This is crucial for layouts with different time units (e.g., Sonyflake uses 10ms)
+	// Convert custom epoch from milliseconds to time units.
+	// Crucial for layouts with non-1ms time units (e.g., Sonyflake/Ultimate use 10ms).
 	customEpochInTimeUnits := cfg.Epoch / cfg.Layout.TimeUnit.Milliseconds()
+
+	// Maximum timestamp value (in time units) for this layout.
+	// Used by lifespan helpers to compute utilization and overflow date correctly
+	// regardless of the layout's timestamp bit width.
+	maxTimestamp := int64(1)<<cfg.Layout.TimestampBits - 1
 
 	return &Generator{
 		epoch:            now,
-		customEpoch:      customEpochInTimeUnits, // Now stored in time units, not milliseconds
+		customEpoch:      customEpochInTimeUnits,
+		customEpochMs:    cfg.Epoch,
 		workerID:         cfg.WorkerID,
 		sequence:         0,
 		lastTimestamp:    0,
@@ -420,6 +447,7 @@ func NewWithConfig(cfg Config) (*Generator, error) {
 		workerShift:      workerShift,
 		maxWorker:        maxWorker,
 		maxSequence:      maxSequence,
+		maxTimestamp:     maxTimestamp,
 		timeUnit:         cfg.Layout.TimeUnit,
 		timeUnitShift:    timeUnitShift,
 	}, nil
@@ -863,26 +891,22 @@ func (g *Generator) WorkerID() int64 {
 //	    log.Warn("High timestamp utilization", "percent", utilization*100)
 //	}
 func (g *Generator) TimestampUtilization() float64 {
-	// Get current timestamp relative to the epoch
-	currentTime := time.Now().UnixMilli()
-	elapsed := currentTime - g.customEpoch
-
-	// Prevent division by zero or negative values
-	if elapsed <= 0 {
+	// Elapsed wall-clock milliseconds since the custom epoch.
+	elapsedMs := time.Now().UnixMilli() - g.customEpochMs
+	if elapsedMs <= 0 {
 		return 0.0
 	}
 
-	// Calculate utilization as percentage of max timestamp
-	utilization := float64(elapsed) / float64(MaxTimestamp)
+	// Total lifespan for this layout (maxTimestamp time units × ms per unit).
+	totalMs := g.maxTimestamp * g.timeUnit.Milliseconds()
+	if totalMs <= 0 {
+		return 0.0
+	}
 
-	// Clamp to [0.0, 1.0] range
+	utilization := float64(elapsedMs) / float64(totalMs)
 	if utilization > 1.0 {
 		return 1.0
 	}
-	if utilization < 0.0 {
-		return 0.0
-	}
-
 	return utilization
 }
 
@@ -903,20 +927,9 @@ func (g *Generator) TimestampUtilization() float64 {
 //	    log.Error("Approaching timestamp overflow!")
 //	}
 func (g *Generator) RemainingLifespan() time.Duration {
-	// Get current timestamp relative to the epoch
-	currentTime := time.Now().UnixMilli()
-	elapsed := currentTime - g.customEpoch
-
-	// Calculate remaining milliseconds until overflow
-	remaining := MaxTimestamp - elapsed
-
-	// If already past overflow (shouldn't happen), return 0
-	if remaining < 0 {
-		return 0
-	}
-
-	// Convert milliseconds to duration
-	return time.Duration(remaining) * time.Millisecond
+	totalMs := g.maxTimestamp * g.timeUnit.Milliseconds()
+	elapsedMs := time.Now().UnixMilli() - g.customEpochMs
+	return msToDuration(totalMs - elapsedMs)
 }
 
 // IsApproachingOverflow returns true if timestamp utilization exceeds 80%.
@@ -956,52 +969,36 @@ func (g *Generator) IsApproachingOverflow() bool {
 //	    "overflow_date", info.OverflowDate,
 //	    "is_approaching", info.IsApproaching)
 func (g *Generator) LifespanInfo() LifespanInfo {
-	// Get current time
-	now := time.Now()
-	currentMillis := now.UnixMilli()
+	currentMillis := time.Now().UnixMilli()
 
-	// Calculate elapsed time since epoch
-	elapsed := currentMillis - g.customEpoch
-	if elapsed < 0 {
-		elapsed = 0
+	// Total lifespan in milliseconds for this layout.
+	totalMs := g.maxTimestamp * g.timeUnit.Milliseconds()
+
+	// Elapsed time since the custom epoch (clamped to >= 0).
+	elapsedMs := currentMillis - g.customEpochMs
+	if elapsedMs < 0 {
+		elapsedMs = 0
 	}
 
-	// Calculate utilization
-	utilization := float64(elapsed) / float64(MaxTimestamp)
-	if utilization > 1.0 {
-		utilization = 1.0
+	utilization := 0.0
+	if totalMs > 0 {
+		utilization = float64(elapsedMs) / float64(totalMs)
+		if utilization > 1.0 {
+			utilization = 1.0
+		}
 	}
-	if utilization < 0.0 {
-		utilization = 0.0
-	}
 
-	// Calculate remaining time
-	remainingMs := MaxTimestamp - elapsed
-	if remainingMs < 0 {
-		remainingMs = 0
-	}
-	remaining := time.Duration(remainingMs) * time.Millisecond
-
-	// Calculate total lifespan (constant)
-	totalLifespan := time.Duration(MaxTimestamp) * time.Millisecond
-
-	// Calculate current age
-	currentAge := time.Duration(elapsed) * time.Millisecond
-
-	// Calculate overflow date
-	epochTime := time.UnixMilli(g.customEpoch)
-	overflowDate := epochTime.Add(totalLifespan)
-
-	// Check if approaching threshold
-	isApproaching := utilization >= TimestampWarningThreshold
+	// OverflowDate is computed in ms-space rather than via epochTime.Add(totalLifespan)
+	// because totalLifespan can saturate to time.Duration max for very long-lived layouts.
+	overflowDate := time.UnixMilli(g.customEpochMs + totalMs)
 
 	return LifespanInfo{
 		Utilization:   utilization,
-		Remaining:     remaining,
-		TotalLifespan: totalLifespan,
-		CurrentAge:    currentAge,
+		Remaining:     msToDuration(totalMs - elapsedMs),
+		TotalLifespan: msToDuration(totalMs),
+		CurrentAge:    msToDuration(elapsedMs),
 		OverflowDate:  overflowDate,
-		IsApproaching: isApproaching,
+		IsApproaching: utilization >= TimestampWarningThreshold,
 	}
 }
 
