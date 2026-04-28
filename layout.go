@@ -210,7 +210,7 @@ var (
 	// Optimized for: The ultimate balance of lifespan, scale, and throughput
 	//
 	// Specifications:
-	//   - Lifespan: ~292 years (time.Duration limit, theoretical 348 years)
+	//   - Lifespan: ~348 years (overflow ~2372 from default 2024 epoch)
 	//   - Max nodes: 65,536
 	//   - Throughput: 12,800 IDs/sec per node
 	//   - Time precision: 10 milliseconds
@@ -219,17 +219,18 @@ var (
 	//
 	// Example: Any production system, enterprise platforms, new services
 	//
-	// This layout beats BOTH LayoutDefault (4x longer lifespan, 64x more nodes)
-	// AND Sonyflake (1.7x longer lifespan, same nodes, half throughput but still plenty).
+	// This layout beats BOTH LayoutDefault (5x longer lifespan, 64x more nodes)
+	// AND Sonyflake (2x longer lifespan, same nodes, half throughput but still plenty).
 	//
-	// With 292 years of lifespan and 65K nodes, this is the sweet spot for 99.9%
+	// With ~348 years of lifespan and 65K nodes, this is the sweet spot for 99.9%
 	// of distributed systems. 12,800 IDs/sec = 1+ billion IDs per day per node.
 	//
 	// RECOMMENDED: Use this for all new projects unless you have specific needs.
 	//
-	// Note: The 40 timestamp bits theoretically provide 348 years, but Go's time.Duration
-	// is capped at ~292 years (int64 nanoseconds limit). In practice, this is still
-	// far longer than any software system will ever run.
+	// Note: LifespanInfo.OverflowDate reports the true overflow (~2372). The
+	// LifespanInfo.TotalLifespan field, however, saturates at ~292 years because
+	// Go's time.Duration is bounded by int64 nanoseconds — far longer than any
+	// software system will run, but worth knowing if you compare the two fields.
 	LayoutUltimate = BitLayout{
 		TimestampBits: 40,
 		WorkerBits:    16,
@@ -242,7 +243,7 @@ var (
 	// Optimized for: Hyper-scale deployments with 100K+ nodes
 	//
 	// Specifications:
-	//   - Lifespan: ~292 years (time.Duration limit, theoretical 348 years)
+	//   - Lifespan: ~348 years (overflow ~2372 from default 2024 epoch)
 	//   - Max nodes: 131,072
 	//   - Throughput: 6,400 IDs/sec per node
 	//   - Time precision: 10 milliseconds
@@ -252,13 +253,14 @@ var (
 	// Example: Google/Amazon/Microsoft-scale infrastructure, global CDN
 	//
 	// This provides 2x more nodes than Sonyflake (131K vs 65K) while maintaining
-	// the same ultra-long lifespan (292 years). Throughput is reduced but 6,400/sec
+	// the same ultra-long lifespan (~348 years). Throughput is reduced but 6,400/sec
 	// is still plenty for most workloads (550+ million IDs per day per node).
 	//
 	// Perfect for planet-scale systems that need to support 100,000+ worker nodes.
 	//
-	// Note: The 40 timestamp bits theoretically provide 348 years, but Go's time.Duration
-	// is capped at ~292 years (int64 nanoseconds limit).
+	// Note: LifespanInfo.OverflowDate reports the true overflow (~2372). The
+	// LifespanInfo.TotalLifespan field saturates at ~292 years (Go's time.Duration
+	// limit, int64 nanoseconds).
 	LayoutMegaScale = BitLayout{
 		TimestampBits: 40,
 		WorkerBits:    17,

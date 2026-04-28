@@ -84,7 +84,7 @@ id, _ := gen.GenerateID()
 **For new projects** (use LayoutUltimate):
 
 ```go
-// 292 years lifespan, 65K nodes, 12.8K IDs/sec per node
+// ~348 years lifespan (overflow ~2372), 65K nodes, 12.8K IDs/sec per node
 cfg := snowflake.DefaultConfig(workerID)
 cfg.Layout = snowflake.LayoutUltimate
 gen, _ := snowflake.NewWithConfig(cfg)
@@ -170,21 +170,23 @@ Choose the optimal trade-off between **lifespan**, **scale**, and **throughput**
 
 | Layout | Lifespan | Max Nodes | Throughput/Node | Use Case |
 |--------|----------|-----------|-----------------|----------|
-| **LayoutDefault** | 69 years | 1,024 | 4.1M IDs/sec | High throughput, <1K nodes |
-| **LayoutSuperior** | 35 years | 16,384 | 512K IDs/sec | Balanced (recommended) |
-| **LayoutExtreme** | 17 years | 131,072 | 128K IDs/sec | Massive scale (100K+ nodes) |
-| **LayoutUltra** | 17 years | 32,768 | 1M IDs/sec | High throughput + scale |
-| **LayoutLongLife** | 139 years | 4,096 | 512K IDs/sec | Long-term systems |
-| **LayoutSonyflake** | 174 years | 65,536 | 25.6K IDs/sec | Sonyflake compatibility |
-| **LayoutUltimate** ⭐ | 292 years | 65,536 | 12.8K IDs/sec | **Best for new projects** |
-| **LayoutMegaScale** | 292 years | 131,072 | 6.4K IDs/sec | Maximum node capacity |
+| **LayoutDefault** | ~69 years (2093) | 1,024 | 4.1M IDs/sec | High throughput, <1K nodes |
+| **LayoutSuperior** | ~34 years (2059) | 16,384 | 512K IDs/sec | Balanced (recommended) |
+| **LayoutExtreme** | ~17 years (2041) | 131,072 | 128K IDs/sec | Massive scale (100K+ nodes) |
+| **LayoutUltra** | ~17 years (2041) | 32,768 | 1M IDs/sec | High throughput + scale |
+| **LayoutLongLife** | ~139 years (2163) | 4,096 | 512K IDs/sec | Long-term systems |
+| **LayoutSonyflake** | ~174 years (2198) | 65,536 | 25.6K IDs/sec | Sonyflake compatibility |
+| **LayoutUltimate** ⭐ | ~348 years (2372) | 65,536 | 12.8K IDs/sec | **Best for new projects** |
+| **LayoutMegaScale** | ~348 years (2372) | 131,072 | 6.4K IDs/sec | Maximum node capacity |
+
+> Lifespans are measured from the default 2024-01-01 epoch and reflect the layout's actual timestamp-bit overflow. Note that `LifespanInfo.TotalLifespan` saturates at ~292 years (the `time.Duration` limit) for the 348-year layouts; `LifespanInfo.OverflowDate` is exact.
 
 **Recommendation:** Use `LayoutUltimate` for new projects - it provides the longest lifespan with excellent scale.
 
 **Example:**
 ```go
 cfg := snowflake.DefaultConfig(workerID)
-cfg.Layout = snowflake.LayoutUltimate  // 292 years, 65K nodes
+cfg.Layout = snowflake.LayoutUltimate  // ~348 years, 65K nodes
 gen, _ := snowflake.NewWithConfig(cfg)
 ```
 
@@ -509,10 +511,10 @@ gen, _ := snowflake.New(workerID)
 
 ```go
 // For new projects (recommended)
-cfg.Layout = snowflake.LayoutUltimate  // 292 years, 65K nodes, 12.8K IDs/sec
+cfg.Layout = snowflake.LayoutUltimate  // ~348 years, 65K nodes, 12.8K IDs/sec
 
 // For massive scale (100K+ nodes)
-cfg.Layout = snowflake.LayoutMegaScale  // 292 years, 131K nodes, 6.4K IDs/sec
+cfg.Layout = snowflake.LayoutMegaScale  // ~348 years, 131K nodes, 6.4K IDs/sec
 
 // For Sonyflake compatibility
 cfg.Layout = snowflake.LayoutSonyflake  // 174 years, 65K nodes, 10ms precision
@@ -629,7 +631,7 @@ CREATE TABLE users (
 
 ┌─────────────────────────────────────────────┬──────────────┬──────────────┐
 │       40 bits: Timestamp (10ms units)       │  16 bits:    │   7 bits:    │
-│     2^40 × 10ms = 292 years                 │  Worker ID   │  Sequence    │
+│     2^40 × 10ms = ~348 years                │  Worker ID   │  Sequence    │
 │                                             │  (65,536)    │  (128)       │
 └─────────────────────────────────────────────┴──────────────┴──────────────┘
                                               ^              ^
@@ -641,7 +643,7 @@ CREATE TABLE users (
 
 - **Timestamp:** Milliseconds (or units) since epoch (2024-01-01)
   - Default: 41 bits = ~69 years
-  - Ultimate: 40 bits × 10ms = 292 years
+  - Ultimate: 40 bits × 10ms = ~348 years
   - Provides time-ordering
 
 - **Worker ID:** Instance identifier
@@ -659,13 +661,13 @@ CREATE TABLE users (
 The package supports 8 pre-configured layouts optimized for different scenarios:
 
 **LayoutUltimate (Recommended):**
-- **Lifespan:** 292 years (until ~2317)
+- **Lifespan:** ~348 years (until ~2372)
 - **Scale:** 65,536 workers
 - **Throughput:** 12,800 IDs/sec per worker
 - **Best for:** New projects needing long lifespan + high scale
 
 **LayoutMegaScale:**
-- **Lifespan:** 292 years
+- **Lifespan:** ~348 years (until ~2372)
 - **Scale:** 131,072 workers (maximum)
 - **Throughput:** 6,400 IDs/sec per worker
 - **Best for:** Hyper-scale deployments (100K+ nodes)
@@ -730,13 +732,13 @@ A: Use distributed coordination (Redis/Etcd) or ensure static assignment in your
 A: Yes, `LayoutDefault` uses the same bit layout (41+10+12). IDs are interoperable (note: different epoch).
 
 **Q: Which layout should I use for a new project?**
-A: `LayoutUltimate` - it provides 292 years lifespan with 65,536 nodes and 12,800 IDs/sec per worker, perfect for 99.9% of use cases.
+A: `LayoutUltimate` - it provides ~348 years of lifespan with 65,536 nodes and 12,800 IDs/sec per worker, perfect for 99.9% of use cases.
 
 **Q: How do I migrate to a different layout?**
 A: Layouts are not backward compatible. Generate new IDs with the new layout, but keep existing IDs in their original format. Use layout-aware parsing: `ParseIDComponentsWithLayout(id, layout)` to parse IDs from different layouts.
 
 **Q: What's the difference between LayoutUltimate and LayoutSonyflake?**
-A: LayoutUltimate has 1.7x longer lifespan (292 vs 174 years), same node capacity (65K), but half the throughput (12.8K vs 25.6K IDs/sec). For most systems, 12.8K/sec per worker is more than sufficient.
+A: LayoutUltimate has ~2x longer lifespan (~348 vs ~174 years), same node capacity (65K), but half the throughput (12.8K vs 25.6K IDs/sec). For most systems, 12.8K/sec per worker is more than sufficient.
 
 **Q: Can I use bitshift optimization with 10ms time units?**
 A: No, 10ms is not a power-of-2, so it uses division fallback. However, the performance impact is negligible (~5-10%). LayoutUltimate and LayoutMegaScale use 10ms for longer lifespan.
