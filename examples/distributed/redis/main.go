@@ -147,7 +147,8 @@ func (wc *WorkerCoordinator) Close() error {
 func main() {
 	ctx := context.Background()
 
-	fmt.Println("=== Distributed Worker ID Coordination Example ===\n")
+	fmt.Println("=== Distributed Worker ID Coordination Example ===")
+	fmt.Println()
 
 	// Connect to Redis
 	redisAddr := os.Getenv("REDIS_ADDR")

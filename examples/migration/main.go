@@ -372,7 +372,8 @@ func main() {
 	} else {
 		// Run all phases sequentially
 		fmt.Println("=== UUID to Snowflake ID Migration Demo ===")
-		fmt.Println("Running all phases sequentially...\n")
+		fmt.Println("Running all phases sequentially...")
+		fmt.Println()
 
 		for phase := PhaseUUIDOnly; phase <= PhaseSnowflakeOnly; phase++ {
 			demonstratePhase(service, phase, ctx)
