@@ -505,6 +505,59 @@ defer releaseWorkerID(ctx, redisClient, workerID)
 gen, _ := snowflake.New(workerID)
 ```
 
+> **Enforce uniqueness, don't just assign it.** However you assign worker IDs,
+> a deploy overlap or zombie process can still leave two live owners of the same
+> ID. Pair assignment with a [`WorkerLease`](#clock-safety--restart-protection)
+> so a generator refuses to start when its identity is already held, and a
+> [`ClockGuard`](#clock-safety--restart-protection) to stay safe across restarts.
+
+### Clock Safety & Restart Protection
+
+Snowflake's correctness rests on two assumptions: time moves forward, and each worker ID has a single live owner. This library layers three defenses. Knowing what each one does — and does not — cover matters in production.
+
+**1. Monotonic clock (always on).** The generator anchors to Go's monotonic clock at construction, so *within a running process* its timestamp never moves backward — NTP steps, leap seconds, and manual clock changes cannot produce duplicate or out-of-order IDs. `MaxClockBackward` is a secondary fail-safe, not the primary defense.
+
+**2. `ClockGuard` (opt-in) — restart regression.** The monotonic clock does **not** survive a restart: the anchor is re-seeded from the wall clock and the in-memory last-emitted timestamp resets to zero. If the wall clock is now *earlier* than IDs already minted (e.g. a fast clock corrected backward, then a restart), a fresh generator with the same worker ID can mint duplicates. A `ClockGuard` persists a high-water timestamp and, on startup, waits for the clock to catch up — or refuses to start if it is too far behind.
+
+```go
+cfg := snowflake.DefaultConfig(workerID)
+cfg.ClockGuard = snowflake.NewFileClockGuard("/var/lib/myapp/snowflake.guard")
+// Optional tuning:
+cfg.ClockGuardInterval = time.Second     // persistence cadence / lease window
+cfg.ClockGuardMaxWait  = 2 * time.Second // refuse to start if the clock is further behind
+
+gen, err := snowflake.NewWithConfig(cfg)
+if err != nil {
+    log.Fatal(err) // e.g. wrapped ErrClockMovedBack: clock regressed beyond MaxWait
+}
+```
+
+The mark is persisted *ahead* of the clock (by one interval), so even a hard crash never leaves emitted IDs unprotected; the cost is that a clean restart may wait up to `ClockGuardInterval` for the clock to catch up. `FileClockGuard` is stdlib-only and suits a single host — for a fleet, implement the `ClockGuard` interface over shared storage (Redis/etcd).
+
+**3. `WorkerLease` (opt-in) — duplicate worker IDs.** Worker-ID uniqueness is *your* operational responsibility; the library trusts the number you pass. Two live processes sharing a worker ID — from a rolling-deploy overlap, a zombie pod after a failed health check, or a copy-pasted `WORKER_ID` — mint duplicate IDs regardless of any clock handling. A `WorkerLease` takes an exclusive lease on the worker identity at startup and refuses to start if another live process holds it.
+
+```go
+cfg := snowflake.DefaultConfig(workerID)
+cfg.WorkerLease = snowflake.NewFileWorkerLease("/var/lib/myapp/leases")
+
+gen, err := snowflake.NewWithConfig(cfg)
+if errors.Is(err, snowflake.ErrWorkerLeaseHeld) {
+    log.Fatal("worker ID already in use by another live process")
+}
+defer gen.Close() // releases the lease on shutdown
+```
+
+`FileWorkerLease` uses an OS advisory file lock (`flock`), so the identity is freed automatically when the process exits or crashes — there is no TTL to tune. It is single-host (unix-family: Linux, macOS, the BSDs); for cross-host coordination, implement `WorkerLease` over Redis/etcd.
+
+**What none of these fix — cross-node clock skew.** With distinct worker IDs, skew between nodes never causes *collisions*, only imperfect global *ordering*. That is inherent to the Snowflake design and is bounded by your NTP synchronization quality.
+
+| Concern | Defense | Coverage |
+|---------|---------|----------|
+| Clock moves backward mid-process | Monotonic clock (always on) | ✅ Fully |
+| Clock regressed across a restart | `ClockGuard` | ✅ Sequential restarts of one worker |
+| Two live processes, same worker ID | `WorkerLease` | ✅ Simultaneous holders |
+| Clock skew between nodes | — | Ordering only; never affects uniqueness |
+
 ### Production Best Practices
 
 **1. Choose the Right Layout**
@@ -594,13 +647,13 @@ CREATE TABLE users (
 ### Common Pitfalls
 
 ❌ **Don't:** Reuse worker IDs across nodes
-✅ **Do:** Ensure unique worker ID per instance
+✅ **Do:** Ensure unique worker ID per instance — and enforce it with a [`WorkerLease`](#clock-safety--restart-protection)
 
 ❌ **Don't:** Use default generator in distributed systems
 ✅ **Do:** Create generator with explicit worker ID
 
 ❌ **Don't:** Ignore clock backward errors
-✅ **Do:** Monitor and alert on clock issues
+✅ **Do:** Monitor and alert on clock issues; add a [`ClockGuard`](#clock-safety--restart-protection) to stay safe across restarts
 
 ❌ **Don't:** Generate >4096 IDs in a millisecond per worker
 ✅ **Do:** Use multiple workers for higher throughput
@@ -679,8 +732,9 @@ Power-of-2 time units (1ms, 2ms, 4ms, 8ms) use bitshift instead of division for 
 
 **Why Monotonic Clock?**
 - Resistant to NTP time corrections
-- Prevents duplicate IDs during clock adjustments
+- Prevents duplicate IDs during clock adjustments *within a running process*
 - Uses `time.Since()` for monotonic guarantees
+- Does not survive a restart — see [Clock Safety & Restart Protection](#clock-safety--restart-protection) for `ClockGuard`
 
 **Why Bitwise Operations?**
 - Compile-time constant evaluation
@@ -705,7 +759,10 @@ Power-of-2 time units (1ms, 2ms, 4ms, 8ms) use bitshift instead of division for 
 A: Each server must have a unique worker ID (0-1023). See [Worker ID Assignment](#worker-id-assignment).
 
 **Q: What happens if the clock moves backward?**
-A: The generator waits if drift is within tolerance (default 5ms), otherwise returns `ErrClockMovedBack`.
+A: *Within a running process*, the monotonic clock prevents backward movement entirely; the `MaxClockBackward` tolerance (default 5ms) is a fail-safe and returns `ErrClockMovedBack` if exceeded. *Across a restart*, enable a [`ClockGuard`](#clock-safety--restart-protection) to detect a regressed wall clock and wait or refuse to start.
+
+**Q: What stops two processes with the same worker ID from colliding?**
+A: Nothing automatic — worker-ID uniqueness is your responsibility. Enable a [`WorkerLease`](#clock-safety--restart-protection) to make a generator refuse to start (`ErrWorkerLeaseHeld`) if another live process already holds its worker identity.
 
 **Q: Can I generate more than 4096 IDs per millisecond?**
 A: Use multiple workers. Each worker can generate 4096 IDs/ms.
