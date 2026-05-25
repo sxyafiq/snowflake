@@ -19,8 +19,12 @@
 //
 // # Production Features
 //
-//   - Monotonic Clock: Uses time.Since() to avoid NTP adjustments
+//   - Monotonic Clock: Uses time.Since() to avoid NTP adjustments (in-process)
 //   - Clock Drift Tolerance: Configurable tolerance (default 5ms) with retry
+//   - Restart Protection: Optional ClockGuard detects a wall clock that
+//     regressed across a restart and waits or refuses to start (see ClockGuard)
+//   - Worker-ID Lease: Optional WorkerLease refuses startup when another live
+//     process already owns the worker ID (see WorkerLease)
 //   - Context Support: Graceful cancellation for long waits
 //   - Embedded Metrics: Zero-allocation atomic counters for observability
 //   - Efficient Busy-Wait: Smart sleeping with runtime.Gosched() yielding
@@ -123,6 +127,11 @@ const (
 	// TimestampWarningThreshold is the utilization percentage at which to warn about
 	// approaching timestamp overflow. Default is 80% (0.80).
 	TimestampWarningThreshold = 0.80
+
+	// DefaultClockGuardInterval is the default persistence cadence for a
+	// ClockGuard, and equivalently the window the persisted high-water mark
+	// runs ahead of the clock. See Config.ClockGuardInterval.
+	DefaultClockGuardInterval = time.Second
 )
 
 // Errors returned by the Snowflake generator.
@@ -183,6 +192,55 @@ type Config struct {
 	// IMPORTANT: IDs generated with different layouts are incompatible.
 	// Choose once and stick with it for the lifetime of your system.
 	Layout BitLayout
+
+	// SequenceResolver overrides sequence-number allocation. When nil
+	// (default), the Generator uses an in-process atomic counter — fast, but
+	// requires every node to have a unique WorkerID.
+	//
+	// Supplying a resolver — typically backed by Redis INCR or similar — lets
+	// a fleet of Generators share a single sequence space, so WorkerID can be
+	// a shared constant or 0. The resolver MUST return values in
+	// [0, layout.MaxSequence]; use Layout.CalculateShifts() to derive the bound.
+	//
+	// Note: GenerateBatch falls back to per-ID resolver calls when this is set
+	// (the local-batch optimization assumes an in-process counter). For
+	// network-bound resolvers, implement a batch-aware lease scheme instead.
+	SequenceResolver SequenceResolver
+
+	// ClockGuard, when non-nil, protects against duplicate IDs after a process
+	// restart in which the wall clock has moved backward below IDs already
+	// emitted (the one failure mode the in-process monotonic clock cannot
+	// cover). It persists a per-(worker, layout, epoch) high-water timestamp;
+	// on startup the Generator waits for the clock to catch up, or refuses to
+	// start if the gap exceeds ClockGuardMaxWait.
+	//
+	// When nil (default), behavior is unchanged and the hot path is unaffected.
+	// See ClockGuard and FileClockGuard. A ClockGuard does NOT protect against
+	// two live processes sharing a worker ID — use WorkerLease for that.
+	ClockGuard ClockGuard
+
+	// ClockGuardInterval is how often the high-water mark is persisted while
+	// running, and equivalently the lease window the mark runs ahead of the
+	// clock. Smaller means less forward jump after a crash but more I/O.
+	// Ignored when ClockGuard is nil. Default: 1s.
+	ClockGuardInterval time.Duration
+
+	// ClockGuardMaxWait bounds how long NewWithConfig will block at startup
+	// waiting for the clock to catch up to a persisted high-water mark before
+	// failing with a ClockError. Because the mark runs ahead by one interval,
+	// a clean restart normally waits up to ~ClockGuardInterval, so MaxWait must
+	// exceed it. Ignored when ClockGuard is nil. Default: ClockGuardInterval + 1s.
+	ClockGuardMaxWait time.Duration
+
+	// WorkerLease, when non-nil, acquires an exclusive lease on this generator's
+	// worker identity at startup, so two live processes cannot share a worker ID
+	// (which would mint duplicate IDs regardless of clock handling). If the
+	// lease is already held, NewWithConfig returns ErrWorkerLeaseHeld.
+	//
+	// Call Generator.Close to release the lease on shutdown. When nil (default),
+	// no lease is taken and behavior is unchanged. See WorkerLease and
+	// FileWorkerLease.
+	WorkerLease WorkerLease
 }
 
 // DefaultConfig returns a Config with production-ready defaults.
@@ -248,6 +306,25 @@ func (c *Config) Validate() error {
 			"must be non-negative",
 			"duration must be >= 0",
 		)
+	}
+
+	// Apply ClockGuard defaults only when a guard is configured, so the
+	// zero-value Config (no guard) is untouched.
+	if c.ClockGuard != nil {
+		if c.ClockGuardInterval <= 0 {
+			c.ClockGuardInterval = DefaultClockGuardInterval
+		}
+		if c.ClockGuardMaxWait <= 0 {
+			c.ClockGuardMaxWait = c.ClockGuardInterval + time.Second
+		}
+		if c.ClockGuardMaxWait < c.ClockGuardInterval {
+			return newConfigError(
+				"ClockGuardMaxWait",
+				c.ClockGuardMaxWait.String(),
+				"must be at least ClockGuardInterval",
+				"the high-water mark runs one interval ahead, so a clean restart can wait up to that long",
+			)
+		}
 	}
 	return nil
 }
@@ -346,6 +423,25 @@ type Generator struct {
 	timeUnit       time.Duration // Time unit for timestamp precision
 	timeUnitShift  int8          // Bitshift for time unit conversion (or -1 for division)
 
+	// resolver, when non-nil, replaces the inline sequence counter. Set via
+	// Config.SequenceResolver. nil means "use the existing inline path."
+	resolver SequenceResolver
+
+	// Clock-guard state, active only when guard != nil (set via
+	// Config.ClockGuard). guardNextPersist is the timestamp at which the
+	// persisted high-water mark must be advanced again; guardLeaseUnits is how
+	// far ahead of the clock the mark is written so a crash never leaves
+	// emitted IDs unprotected. All accessed only under mu.
+	guard            ClockGuard
+	guardKey         GuardKey
+	guardLeaseUnits  int64
+	guardNextPersist int64
+	guardMaxWait     time.Duration
+
+	// lease, when non-nil, is the held worker-ID lease (set via
+	// Config.WorkerLease). Released by Close. Accessed only under mu.
+	lease LeaseHandle
+
 	// Metrics counters using atomic operations for lock-free reads.
 	// These are separated from hot path fields to avoid false sharing on the same cache line.
 	generated        atomic.Int64 // Counter: total IDs generated
@@ -435,7 +531,7 @@ func NewWithConfig(cfg Config) (*Generator, error) {
 	// regardless of the layout's timestamp bit width.
 	maxTimestamp := int64(1)<<cfg.Layout.TimestampBits - 1
 
-	return &Generator{
+	g := &Generator{
 		epoch:            now,
 		customEpoch:      customEpochInTimeUnits,
 		customEpochMs:    cfg.Epoch,
@@ -450,7 +546,34 @@ func NewWithConfig(cfg Config) (*Generator, error) {
 		maxTimestamp:     maxTimestamp,
 		timeUnit:         cfg.Layout.TimeUnit,
 		timeUnitShift:    timeUnitShift,
-	}, nil
+		resolver:         cfg.SequenceResolver,
+		guard:            cfg.ClockGuard,
+	}
+
+	// Acquire the worker-ID lease first: if we cannot prove exclusive ownership
+	// of this identity, refuse to start before doing any other work.
+	if cfg.WorkerLease != nil {
+		handle, err := cfg.WorkerLease.Acquire(context.Background(), guardKeyForConfig(cfg).String())
+		if err != nil {
+			return nil, err
+		}
+		g.lease = handle
+	}
+
+	// Recover from any persisted clock-guard state. This may block (up to
+	// ClockGuardMaxWait) or fail if the wall clock has regressed below
+	// previously-emitted IDs. Release the lease on failure so a retry can
+	// re-acquire it.
+	if g.guard != nil {
+		if err := g.recoverFromGuard(cfg); err != nil {
+			if g.lease != nil {
+				_ = g.lease.Release()
+			}
+			return nil, err
+		}
+	}
+
+	return g, nil
 }
 
 // GenerateID creates a new Snowflake ID with full type support.
@@ -584,42 +707,69 @@ func (g *Generator) generateInt64WithContext(ctx context.Context) (int64, error)
 		}
 	}
 
-	// Same time unit as last ID: increment sequence
-	if timestamp == g.lastTimestamp {
-		// Use bitwise AND with maxSequence to wrap around
-		// This is equivalent to (sequence + 1) % maxSequence but faster
-		g.sequence = (g.sequence + 1) & g.maxSequence
-
-		// Sequence overflow: exhausted all IDs for this time unit
-		if g.sequence == 0 {
-			g.sequenceOverflow.Add(1)
-			var err error
-			timestamp, err = g.waitNextMillisWithContext(ctx, timestamp)
-			if err != nil {
-				return 0, err
+	// Allocate the sequence number for this time unit. Two paths:
+	//   - resolver==nil (default): inline atomic counter, zero-allocation hot path
+	//   - resolver!=nil: delegate to the user-supplied SequenceResolver, which
+	//     may coordinate across processes (e.g. Redis INCR). On
+	//     ErrSequenceExhausted we wait for the next time unit and retry.
+	var seq int64
+	if g.resolver == nil {
+		if timestamp == g.lastTimestamp {
+			g.sequence = (g.sequence + 1) & g.maxSequence
+			if g.sequence == 0 {
+				g.sequenceOverflow.Add(1)
+				var err error
+				timestamp, err = g.waitNextMillisWithContext(ctx, timestamp)
+				if err != nil {
+					return 0, err
+				}
 			}
+		} else {
+			g.sequence = 0
 		}
+		seq = g.sequence
 	} else {
-		// New time unit: reset sequence to 0
-		g.sequence = 0
+		var err error
+		seq, timestamp, err = g.nextSequenceFromResolver(ctx, timestamp)
+		if err != nil {
+			return 0, err
+		}
 	}
 
 	g.lastTimestamp = timestamp
 
-	// Compose ID using dynamic bitshifting based on layout
-	// Uses pre-calculated shifts for zero runtime overhead
-	// timestamp goes in upper bits (position determined by timestampShift)
-	// workerID goes in middle bits (position determined by workerShift)
-	// sequence goes in lower bits (no shift needed)
-	// NOTE: Both timestamp and customEpoch are in time units (not milliseconds)
-	id := ((timestamp - g.customEpoch) << g.timestampShift) | // Shift relative timestamp to upper bits
-		(g.workerID << g.workerShift) | // Shift worker ID to middle bits
-		g.sequence // Sequence in lower bits (no shift needed)
+	// Advance the persisted clock-guard high-water mark if we've reached the
+	// next persist threshold. Fails closed: no ID is emitted if it cannot be
+	// persisted. No-op (one comparison) when no guard is configured.
+	if err := g.persistGuard(ctx, timestamp); err != nil {
+		return 0, err
+	}
 
-	// Update metrics atomically (lock-free)
+	// Compose ID. timestamp and customEpoch are in time units (not ms).
+	id := ((timestamp - g.customEpoch) << g.timestampShift) |
+		(g.workerID << g.workerShift) |
+		seq
+
 	g.generated.Add(1)
 
 	return id, nil
+}
+
+// nextSequenceFromResolver calls the configured SequenceResolver, retrying on
+// ErrSequenceExhausted by advancing to the next time unit. Returns the
+// allocated sequence and the (possibly advanced) timestamp the caller should
+// use when composing the ID.
+func (g *Generator) nextSequenceFromResolver(ctx context.Context, timestamp int64) (int64, int64, error) {
+	seq, err := g.resolver.Next(ctx, timestamp)
+	for errors.Is(err, ErrSequenceExhausted) {
+		g.sequenceOverflow.Add(1)
+		timestamp, err = g.waitNextMillisWithContext(ctx, timestamp)
+		if err != nil {
+			return 0, timestamp, err
+		}
+		seq, err = g.resolver.Next(ctx, timestamp)
+	}
+	return seq, timestamp, err
 }
 
 // MustGenerateID generates an ID and panics on error
@@ -684,6 +834,23 @@ func (g *Generator) MustGenerate() int64 {
 func (g *Generator) GenerateBatch(ctx context.Context, count int) ([]ID, error) {
 	if count <= 0 {
 		return []ID{}, nil
+	}
+
+	// Resolver mode: every ID must consult the resolver, which is typically
+	// network-bound. The local-batch optimization (single mutex acquisition,
+	// no per-ID resolver call) doesn't apply, so fall back to per-ID
+	// generation. Custom resolvers wanting amortized batching should
+	// implement their own lease scheme on top of this loop.
+	if g.resolver != nil {
+		ids := make([]ID, 0, count)
+		for i := 0; i < count; i++ {
+			id, err := g.GenerateIDWithContext(ctx)
+			if err != nil {
+				return ids, err
+			}
+			ids = append(ids, id)
+		}
+		return ids, nil
 	}
 
 	// Pre-allocate slice with exact capacity
@@ -767,6 +934,12 @@ func (g *Generator) GenerateBatch(ctx context.Context, count int) ([]ID, error) 
 		}
 
 		g.lastTimestamp = timestamp
+
+		// Advance the persisted clock-guard high-water mark when due. Fails
+		// closed: return the partial batch if the mark cannot be persisted.
+		if err := g.persistGuard(ctx, timestamp); err != nil {
+			return ids, err
+		}
 
 		// Compose ID using dynamic bitshifting based on layout
 		id := ((timestamp - g.customEpoch) << g.timestampShift) |
@@ -874,6 +1047,32 @@ func (g *Generator) ResetMetrics() {
 //	log.Info("generator initialized", "workerID", workerID)
 func (g *Generator) WorkerID() int64 {
 	return g.workerID
+}
+
+// Close releases resources held by the Generator — currently the worker-ID
+// lease acquired via Config.WorkerLease, if any.
+//
+// It is safe to call Close multiple times, and safe to call on a Generator
+// created without a WorkerLease (it is then a no-op returning nil), so callers
+// that don't use leases are unaffected. After Close, do not generate further
+// IDs with this Generator.
+//
+// Example:
+//
+//	gen, err := snowflake.NewWithConfig(cfg)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	defer gen.Close()
+func (g *Generator) Close() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.lease == nil {
+		return nil
+	}
+	lease := g.lease
+	g.lease = nil
+	return lease.Release()
 }
 
 // TimestampUtilization returns the percentage of timestamp range used (0.0-1.0).
