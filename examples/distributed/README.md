@@ -20,6 +20,14 @@ Use Redis to coordinate worker ID assignment:
 4. **Graceful release**: Worker ID returned to pool on shutdown
 5. **Auto-reclaim**: Dead workers' IDs automatically expire
 
+> **Two complementary patterns.** The [`redis/`](redis) example below *assigns*
+> a worker ID from a pool. The [`redis-hardening/`](redis-hardening) example
+> instead implements the library's `snowflake.WorkerLease` and
+> `snowflake.ClockGuard` interfaces over Redis, so the generator itself refuses
+> to start on a duplicate worker ID (`ErrWorkerLeaseHeld`) and stays safe across
+> restarts under a regressed clock. Use pool assignment to *pick* an ID and a
+> `WorkerLease` to *enforce* its exclusivity.
+
 ## Quick Start
 
 ### Start Redis

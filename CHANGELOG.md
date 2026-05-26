@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Generator.Close` to release the worker-ID lease on shutdown (no-op when no
   lease is configured; safe to call multiple times).
 - `ErrWorkerLeaseHeld` error.
+- Examples: `examples/hardening` (file-based guard + lease, single host) and
+  `examples/distributed/redis-hardening` (Redis-backed `ClockGuard` and
+  `WorkerLease` for multi-host).
 
 ---
 

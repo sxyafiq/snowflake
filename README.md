@@ -558,6 +558,10 @@ defer gen.Close() // releases the lease on shutdown
 | Two live processes, same worker ID | `WorkerLease` | ✅ Simultaneous holders |
 | Clock skew between nodes | — | Ordering only; never affects uniqueness |
 
+**Runnable examples:**
+- [`examples/hardening`](examples/hardening) — both guards wired with the file-based defaults (single host, no dependencies).
+- [`examples/distributed/redis-hardening`](examples/distributed/redis-hardening) — `ClockGuard` and `WorkerLease` implemented over Redis for multi-host deployments.
+
 ### Production Best Practices
 
 **1. Choose the Right Layout**
