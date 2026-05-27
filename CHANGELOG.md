@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [1.1.0] - 2026-05-27
+
+> Backward-compatible. No migration required: every new `Config` field defaults
+> to `nil` (off) and `Generator.Close` is additive, so existing code compiles
+> and behaves exactly as before. All new behavior is opt-in.
+
 ### Added
 - `SequenceResolver` interface and `NewLocalResolver` to make sequence-number
   allocation pluggable, allowing a fleet of generators to share a sequence space
@@ -73,5 +81,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 -->
 
-[Unreleased]: https://github.com/sxyafiq/snowflake/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/sxyafiq/snowflake/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/sxyafiq/snowflake/compare/v1.0.1...v1.1.0
 [1.0.0]: https://github.com/sxyafiq/snowflake/releases/tag/v1.0.0
