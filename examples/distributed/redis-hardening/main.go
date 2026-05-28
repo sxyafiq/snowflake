@@ -104,6 +104,15 @@ type RedisWorkerLease struct {
 	prefix  string
 	ttl     time.Duration
 	renewal time.Duration
+
+	// OnLost, when non-nil, is invoked from the heartbeat goroutine if a
+	// renewal is rejected — meaning the lease expired and another process took
+	// it. The owning process can no longer prove exclusive ownership, so it
+	// MUST stop generating IDs (typical patterns: close a shutdown channel,
+	// call cancel() on the app context, or os.Exit). Receives the Redis key.
+	//
+	// If nil, lease loss is only logged.
+	OnLost func(key string)
 }
 
 // NewRedisWorkerLease returns a WorkerLease backed by rdb.
@@ -134,11 +143,12 @@ func (l *RedisWorkerLease) Acquire(ctx context.Context, key string) (snowflake.L
 	}
 
 	h := &redisLeaseHandle{
-		rdb:   l.rdb,
-		key:   l.key(key),
-		token: token,
-		ttl:   l.ttl,
-		stop:  make(chan struct{}),
+		rdb:    l.rdb,
+		key:    l.key(key),
+		token:  token,
+		ttl:    l.ttl,
+		stop:   make(chan struct{}),
+		onLost: l.OnLost,
 	}
 	go h.heartbeat(l.renewal)
 	return h, nil
@@ -163,19 +173,19 @@ return 0
 
 // redisLeaseHandle owns one acquired lease and renews it until released.
 type redisLeaseHandle struct {
-	rdb   *redis.Client
-	key   string
-	token string
-	ttl   time.Duration
-	once  sync.Once
-	stop  chan struct{}
+	rdb    *redis.Client
+	key    string
+	token  string
+	ttl    time.Duration
+	once   sync.Once
+	stop   chan struct{}
+	onLost func(key string)
 }
 
 // heartbeat renews the lease on an interval until Release is called.
 //
 // If a renewal is rejected — the lease expired and another process took it —
-// this logs and stops. A production implementation should do more than log:
-// surface the loss (callback or channel) so the owner stops generating IDs,
+// this logs and invokes OnLost (if set) so the owner can stop generating IDs,
 // since it can no longer prove exclusive ownership of the worker identity.
 func (h *redisLeaseHandle) heartbeat(interval time.Duration) {
 	ticker := time.NewTicker(interval)
@@ -190,6 +200,9 @@ func (h *redisLeaseHandle) heartbeat(interval time.Duration) {
 			cancel()
 			if err != nil || res == 0 {
 				log.Printf("worker lease %s: renewal failed (err=%v owned=%d) — lease lost", h.key, err, res)
+				if h.onLost != nil {
+					h.onLost(h.key)
+				}
 				return
 			}
 		}
@@ -239,9 +252,22 @@ func main() {
 	}
 
 	const workerID = 42
+
+	// Wire a lease-loss handler. In production this is where you tear down:
+	// cancel contexts, drain in-flight work, and stop minting IDs — anything
+	// emitted after the lease is gone can no longer be proven unique.
+	leaseLost := make(chan string, 1)
+	lease := NewRedisWorkerLease(rdb, "snowflake", 30*time.Second)
+	lease.OnLost = func(key string) {
+		select {
+		case leaseLost <- key:
+		default: // already signaled
+		}
+	}
+
 	cfg := snowflake.DefaultConfig(workerID)
 	cfg.ClockGuard = NewRedisClockGuard(rdb, "snowflake")
-	cfg.WorkerLease = NewRedisWorkerLease(rdb, "snowflake", 30*time.Second)
+	cfg.WorkerLease = lease
 
 	gen, err := snowflake.NewWithConfig(cfg)
 	if errors.Is(err, snowflake.ErrWorkerLeaseHeld) {
@@ -254,6 +280,13 @@ func main() {
 
 	fmt.Printf("Generator for worker %d started (Redis-backed guard + lease).\n\n", gen.WorkerID())
 	for i := 0; i < 10; i++ {
+		// Bail out immediately if the heartbeat lost the lease mid-run.
+		select {
+		case key := <-leaseLost:
+			log.Fatalf("lease %q lost mid-run — refusing to mint further IDs", key)
+		default:
+		}
+
 		id, err := gen.GenerateID()
 		if err != nil {
 			log.Fatalf("generate: %v", err)
