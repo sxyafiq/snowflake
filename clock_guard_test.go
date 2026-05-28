@@ -232,3 +232,40 @@ func TestGenerator_GuardStoreFailureFailsClosed(t *testing.T) {
 func nowLogicalMs() int64 {
 	return time.Now().UnixMilli()
 }
+
+// BenchmarkGenerate_NoGuard establishes the per-ID baseline with no ClockGuard
+// configured — the default zero-value path that existing callers use.
+func BenchmarkGenerate_NoGuard(b *testing.B) {
+	gen, err := New(1)
+	if err != nil {
+		b.Fatalf("New: %v", err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := gen.GenerateID(); err != nil {
+			b.Fatalf("GenerateID: %v", err)
+		}
+	}
+}
+
+// BenchmarkGenerate_WithGuard measures the same path with a ClockGuard
+// configured. The additional per-ID cost is a nil-pointer check and an int64
+// comparison; periodic Store calls amortize to near-zero at the default
+// interval. memGuard's Store is in-memory so this isolates the in-process
+// overhead from any I/O backend.
+func BenchmarkGenerate_WithGuard(b *testing.B) {
+	cfg := DefaultConfig(1)
+	cfg.ClockGuard = &memGuard{}
+	gen, err := NewWithConfig(cfg)
+	if err != nil {
+		b.Fatalf("NewWithConfig: %v", err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := gen.GenerateID(); err != nil {
+			b.Fatalf("GenerateID: %v", err)
+		}
+	}
+}
